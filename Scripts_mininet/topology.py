@@ -11,15 +11,12 @@ def parse_arguments():
     parser.add_argument("--spine", type=int, default=2, help="Cantidad de switches spine (por defecto: 2)")
     parser.add_argument("--leaf", type=int, default=4, help="Cantidad de switches leaf (por defecto: 4)")
     parser.add_argument("--hosts", type=int, default=2, help="Cantidad de hosts por switch leaf (por defecto: 2)")
-    # parser.add_argument("--bw", type=int, default=1000, help="Capacidad de los enlaces en Mbps (por defecto: 1000)")
+    parser.add_argument("--bw", type=int, default=20, help="Capacidad de los enlaces en Mbps (por defecto: 1000)")
 
     return parser.parse_args()
 
-#def create_spine_leaf_topology(spine_switches, leaf_switches, hosts_per_leaf, link_bandwidth):
-def create_spine_leaf_topology(spine_switches, leaf_switches, hosts_per_leaf):
-    
+def create_spine_leaf_topology(spine_switches, leaf_switches, hosts_per_leaf, link_bandwidth):
     net = Mininet(controller=None, switch=OVSSwitch, link=TCLink)
-
     # Agregar el controlador remoto
     c0 = net.addController('c0', controller=RemoteController, ip='127.0.0.1', port=6633, protocols="OpenFlow13")
 
@@ -32,15 +29,15 @@ def create_spine_leaf_topology(spine_switches, leaf_switches, hosts_per_leaf):
         for spine in spines:
             # net.addLink(leaf, spine, bw=link_bandwidth, htb=True, r2q=r2q_value)
             # net.addLink(spine, leaf, bw=link_bandwidth, htb=True, r2q=r2q_value)
-            net.addLink(leaf, spine)
-            net.addLink(spine, leaf)
+            net.addLink(leaf, spine, cls=TCLink, bw=link_bandwidth, htb=True)
+            #net.addLink(spine, leaf)
 
     # Agregar hosts y conectarlos a los switches leaf
     host_count = 1
     for leaf in leaves:
         for _ in range(hosts_per_leaf):
             host = net.addHost(f"h{host_count}")
-            net.addLink(host, leaf)
+            net.addLink(host, leaf, cls=TCLink, bw=link_bandwidth, htb=True)
             # net.addLink(host, leaf, bw=link_bandwidth, htb=True, r2q=r2q_value)
 
             host_count += 1
@@ -57,5 +54,4 @@ def create_spine_leaf_topology(spine_switches, leaf_switches, hosts_per_leaf):
 if __name__ == "__main__":
     setLogLevel("info")
     args = parse_arguments()
-    # create_spine_leaf_topology(args.spine, args.leaf, args.hosts, args.bw)
-    create_spine_leaf_topology(args.spine, args.leaf, args.hosts)
+    create_spine_leaf_topology(args.spine, args.leaf, args.hosts, args.bw)
