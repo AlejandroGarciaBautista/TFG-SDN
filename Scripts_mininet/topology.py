@@ -35,7 +35,7 @@ def create_spine_leaf_topology(spine_switches, leaf_switches, hosts_per_leaf, li
                 net.addLink(leaf, spine, cls=TCLink, bw=link_bandwidth, htb=True)
                 uplinks = uplinks * 2
 
-    bw_leaf2host = (3 * (uplinks * bw)) / hosts_per_leaf
+    bw_leaf2host = (3 * (uplinks * link_bandwidth)) / hosts_per_leaf
     if (bw_leaf2host > 1000): bw_leaf2host = 1000
 
     # Agregar hosts y conectarlos a los switches leaf
