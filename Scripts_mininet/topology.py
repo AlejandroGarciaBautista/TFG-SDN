@@ -26,7 +26,7 @@ def create_spine_leaf_topology(spine_switches, leaf_switches, hosts_per_leaf, li
     spines = [net.addSwitch(f"spine{i+1}") for i in range(spine_switches)]
     leaves = [net.addSwitch(f"leaf{i+1}") for i in range(leaf_switches)]
 
-    uplinks = spines.length()
+    uplinks = spine_switches
     # Conectar switches leaf a los switches spine con redundancia
     for leaf in leaves:
         for spine in spines:
