@@ -43,7 +43,7 @@ def create_spine_leaf_topology(spine_switches, leaf_switches, hosts_per_leaf, li
     for leaf in leaves:
         for _ in range(hosts_per_leaf):
             host = net.addHost(f"h{host_count}")
-            net.addLink(host, leaf, cls=TCLink, bw_leaf2host, htb=True)
+            net.addLink(host, leaf, cls=TCLink, bw=bw_leaf2host, htb=True)
 
             host_count += 1
 
