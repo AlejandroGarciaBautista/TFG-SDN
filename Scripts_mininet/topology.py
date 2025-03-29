@@ -23,8 +23,8 @@ def create_spine_leaf_topology(spine_switches, leaf_switches, hosts_per_leaf, li
     c0 = net.addController('c0', controller=RemoteController, ip=controller_ip, port=6633, protocols="OpenFlow13")
 
     # Crear switches spine y leaf con nombres más claros
-    spines = [net.addSwitch(f"spine{i+1}") for i in range(spine_switches)]
-    leaves = [net.addSwitch(f"leaf{i+1}") for i in range(leaf_switches)]
+    spines = [net.addSwitch(f"spine{i+1}", protocols="OpenFlow13") for i in range(spine_switches)]
+    leaves = [net.addSwitch(f"leaf{i+1}", protocols="OpenFlow13") for i in range(leaf_switches)]
 
     uplinks = spine_switches
     # Conectar switches leaf a los switches spine con redundancia
