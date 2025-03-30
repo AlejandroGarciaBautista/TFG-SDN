@@ -9,8 +9,11 @@ import networkx as nx
 from ryu.lib.packet import packet, ethernet, lldp
 from ryu.ofproto import ether
 import matplotlib.pyplot as plt
+from ryu.ofproto import ofproto_v1_3
 
 class NetworkDiscovery(app_manager.RyuApp):
+    OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
+
     def __init__(self, *args, **kwargs):
         super(NetworkDiscovery, self).__init__(*args, **kwargs)
         self.topology_graph = nx.Graph()
@@ -18,7 +21,7 @@ class NetworkDiscovery(app_manager.RyuApp):
     
     def generate_graph_image(self):
         pos = nx.spring_layout(self.topology_graph)  # Posición de los nodos
-        plt.figure(figsize=(10, 10))
+        plt.figure(figsize=(30, 20))
         
         # Dibujar el grafo
         nx.draw(self.topology_graph, pos, with_labels=True, node_color='lightblue', font_weight='bold', node_size=2000, font_size=10)
@@ -48,16 +51,16 @@ class NetworkDiscovery(app_manager.RyuApp):
 
     def _discover_topology(self):
         self.topology_graph.clear()
-        switches = get_switch(self)
-        links = get_link(self)
-        hosts = get_host(self)
+        switches = get_switch(self, None)
+        links = get_link(self, None)
+        hosts = get_host(self, None)
         
         # LOGS PARA DEPURACIÓN
-        # self.logger.info("Switches detectados: %s", [s.dp.id for s in switches])
-        self.logger.info("Switches detectados:")
-        for switch in switches:
-            mac_addresses = [port.hw_addr for port in switch.ports]
-            self.logger.info("  Switch %s - MACs: %s", switch.dp.id, mac_addresses)
+        self.logger.info("Switches detectados: %s", [s.dp.id for s in switches])
+        # self.logger.info("Switches detectados:")
+        # for switch in switches:
+        #     mac_addresses = [port.hw_addr for port in switch.ports]
+        #     self.logger.info("  Switch %s - MACs: %s", switch.dp.id, mac_addresses)
         
         self.logger.info("Enlaces detectados: %s", [(l.src.dpid, l.dst.dpid) for l in links])
         self.logger.info("Hosts detectados: %s", [h.mac for h in hosts])
