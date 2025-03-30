@@ -65,10 +65,10 @@ def create_spine_leaf_topology(spine_switches, leaf_switches, hosts_per_leaf, li
     # Agregar las reglas necesarias para manejar tráfico desconocido, ARP y LLDP
     # Regla para permitir el tráfico ARP en los switches leaf
     for i in range(1, spine_switches + 1):
-        net.get(f"spine{i}").cmd(f"ovs-ofctl -O OpenFlow13 add-flow spine{i} 'priority=10,arp,actions=controller'")
+       net.get(f"spine{i}").cmd(f"ovs-ofctl -O OpenFlow13 add-flow spine{i} 'priority=10,arp,actions=controller'")
         
     for i in range(1, leaf_switches + 1):
-        net.get(f"leaf{i}").cmd(f"ovs-ofctl -O OpenFlow13 add-flow leaf{i} 'priority=10,arp,actions=controller'")
+       net.get(f"leaf{i}").cmd(f"ovs-ofctl -O OpenFlow13 add-flow leaf{i} 'priority=10,arp,actions=controller'")
 
     ping_one_packet(net)
 
