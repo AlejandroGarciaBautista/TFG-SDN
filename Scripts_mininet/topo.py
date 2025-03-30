@@ -60,18 +60,18 @@ def create_spine_leaf_topology(spine_switches, leaf_switches, hosts_per_leaf, li
     #     net.get(f"leaf{i}").cmd(f"ovs-ofctl -O OpenFlow13 add-flow leaf{i} 'priority=10,arp,actions=controller'")
 
     # Regla para permitir el reenvío de paquetes LLDP
-    for i in range(1, spine_switches + 1):
-        net.get(f"spine{i}").cmd(f"ovs-ofctl -O OpenFlow13 add-flow spine{i} 'priority=15,dl_type=0x88cc,actions=controller'")
-
-    for i in range(1, leaf_switches + 1):
-        net.get(f"leaf{i}").cmd(f"ovs-ofctl -O OpenFlow13 add-flow leaf{i} 'priority=15,dl_type=0x88cc,actions=controller'")
-
-    # Permitir el reenvío de tráfico desconocido
     # for i in range(1, spine_switches + 1):
-    #     net.get(f"spine{i}").cmd(f"ovs-ofctl -O OpenFlow13 add-flow spine{i} 'priority=5,actions=NORMAL'")
+    #     net.get(f"spine{i}").cmd(f"ovs-ofctl -O OpenFlow13 add-flow spine{i} 'priority=15,dl_type=0x88cc,actions=controller'")
 
     # for i in range(1, leaf_switches + 1):
-    #     net.get(f"leaf{i}").cmd(f"ovs-ofctl -O OpenFlow13 add-flow leaf{i} 'priority=5,actions=NORMAL'")
+    #     net.get(f"leaf{i}").cmd(f"ovs-ofctl -O OpenFlow13 add-flow leaf{i} 'priority=15,dl_type=0x88cc,actions=controller'")
+
+    # Permitir el reenvío de tráfico desconocido
+    for i in range(1, spine_switches + 1):
+        net.get(f"spine{i}").cmd(f"ovs-ofctl -O OpenFlow13 add-flow spine{i} 'priority=5,actions=NORMAL'")
+
+    for i in range(1, leaf_switches + 1):
+        net.get(f"leaf{i}").cmd(f"ovs-ofctl -O OpenFlow13 add-flow leaf{i} 'priority=5,actions=NORMAL'")
 
     # Mostrar CLI de Mininet
     CLI(net)
