@@ -8,6 +8,7 @@ from ryu.topology.api import get_switch, get_link, get_host
 import networkx as nx
 from ryu.lib.packet import packet, ethernet, lldp
 from ryu.ofproto import ether
+import matplotlib.pyplot as plt
 
 class NetworkDiscovery(app_manager.RyuApp):
     def __init__(self, *args, **kwargs):
@@ -15,10 +16,24 @@ class NetworkDiscovery(app_manager.RyuApp):
         self.topology_graph = nx.Graph()
         self.monitor_thread = hub.spawn(self._monitor_topology)
     
+    def generate_graph_image(self):
+        pos = nx.spring_layout(self.topology_graph)  # Posición de los nodos
+        plt.figure(figsize=(10, 10))
+        
+        # Dibujar el grafo
+        nx.draw(self.topology_graph, pos, with_labels=True, node_color='lightblue', font_weight='bold', node_size=2000, font_size=10)
+        
+        # Guardar la imagen
+        plt.savefig("/home/alejandro/Desktop/TFG-SDN/topology_graph.png")  # Guardar la imagen en el directorio temporal
+        plt.close()
+
+        self.logger.info("Imagen del grafo guardada como /home/alejandro/Desktop/TFG-SDN/topology_graph.png")
+
     def _monitor_topology(self):
         while True:
             self._discover_topology()
-            hub.sleep(60)  # Monitoreo cada 10 segundos
+            self.generate_graph_image()  # Generar la imagen cada vez que se actualiza la topología
+            hub.sleep(10)  # Monitoreo cada 10 segundos
     
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
     def _packet_in_handler(self, ev):
@@ -26,8 +41,8 @@ class NetworkDiscovery(app_manager.RyuApp):
         pkt = packet.Packet(msg.data)
         eth = pkt.get_protocol(ethernet.ethernet)
 
-        # if eth.ethertype == ether.ETH_TYPE_LLDP:
-        #     return  # Ignorar paquetes LLDP ya que se usan solo para descubrimiento
+        if eth.ethertype == ether.ETH_TYPE_LLDP:
+            return  # Ignorar paquetes LLDP ya que se usan solo para descubrimiento
 
         self.logger.info("Paquete recibido en switch %s", msg.datapath.id)
 
