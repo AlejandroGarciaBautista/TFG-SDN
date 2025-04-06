@@ -12,8 +12,8 @@ def parse_arguments():
     parser.add_argument("--leaf", type=int, default=4, help="Cantidad de switches leaf (por defecto: 4)")
     parser.add_argument("--hosts", type=int, default=12, help="Cantidad de hosts por switch leaf (por defecto: 2)")
     parser.add_argument("--bw", type=int, default=1000, help="Capacidad de los enlaces Uplink en Mbps (por defecto: 1000 (máximo permitido))")
-    parser.add_argument("--rd", type=bool, default=False, help="Aplicar Redundancia en la red (por defecto: False)")
-    parser.add_argument("-c", type=str, default="192.168.56.101", help="Dirección IP del controlador SDN (por defecto: 192.168.56.01)")
+    parser.add_argument("--rd", type=bool, default=True, help="Aplicar Redundancia en la red (por defecto: True)")
+    parser.add_argument("-c", type=str, default="192.168.56.101", help="Dirección IP del controlador SDN (por defecto: 192.168.56.101)")
 
     return parser.parse_args()
 
