@@ -1,6 +1,6 @@
 import argparse
 from mininet.net import Mininet
-from mininet.node import Controller, OVSSwitch, Host, RemoteController
+from mininet.node import OVSSwitch, RemoteController
 from mininet.link import TCLink
 from mininet.cli import CLI
 from mininet.log import setLogLevel
@@ -16,17 +16,6 @@ def parse_arguments():
     parser.add_argument("-c", type=str, default="192.168.56.101", help="Dirección IP del controlador SDN (por defecto: 192.168.56.101)")
 
     return parser.parse_args()
-
-def ping_one_packet(net):
-    # Realizar un ping desde cada host con un solo paquete
-    for host in net.hosts:
-        # Ping a otros hosts (no a sí mismo)
-        for target in net.hosts:
-            if host != target:
-                # Ejecutar un ping desde host a target, enviando solo un paquete
-                print(f"Enviando un paquete desde {host.name} a {target.name}")
-                host.cmd(f"ping -c 1 {target.IP()}")
-                break
 
 def create_spine_leaf_topology(spine_switches, leaf_switches, hosts_per_leaf, link_bandwidth, redundancy, controller_ip):
     net = Mininet(controller=None, switch=OVSSwitch, link=TCLink)
@@ -61,16 +50,6 @@ def create_spine_leaf_topology(spine_switches, leaf_switches, hosts_per_leaf, li
 
     # Iniciar la red
     net.start()
-
-    # Agregar las reglas necesarias para manejar tráfico desconocido, ARP y LLDP
-    # Regla para permitir el tráfico ARP en los switches leaf
-    for i in range(1, spine_switches + 1):
-       net.get(f"spine{i}").cmd(f"ovs-ofctl -O OpenFlow13 add-flow spine{i} 'priority=10,arp,actions=controller'")
-        
-    for i in range(1, leaf_switches + 1):
-       net.get(f"leaf{i}").cmd(f"ovs-ofctl -O OpenFlow13 add-flow leaf{i} 'priority=10,arp,actions=controller'")
-
-    ping_one_packet(net)
 
     # Mostrar CLI de Mininet
     CLI(net)
