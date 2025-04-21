@@ -76,7 +76,7 @@ class ShortestPath(app_manager.RyuApp):
                                          ofproto.OFPP_CONTROLLER, out_port, msg.data)
             datapath.send_msg(out)
         else:
-            self.flood(msg)
+            self.controlled_arp_forwarding(msg, src_ip, dst_ip)
 
     def _build_packet_out(self, datapath, buffer_id, src_port, dst_port, data):
         actions = [datapath.ofproto_parser.OFPActionOutput(dst_port)] if dst_port else []
@@ -86,15 +86,32 @@ class ShortestPath(app_manager.RyuApp):
             datapath=datapath, buffer_id=buffer_id,
             data=msg_data, in_port=src_port, actions=actions)
 
-    def flood(self, msg):
+    def controlled_arp_forwarding(self, msg, src_ip, dst_ip):
+        """
+        - Solo reenvía paquetes ARP si no se conoce el destino.
+        - Solo reenvía a puertos de acceso no asociados aún a un host.
+        """
+        datapath = msg.datapath
+        ofproto = datapath.ofproto
+
+        if self.arp_handler.get_host_location(dst_ip):
+            # Ya conocemos la ubicación del destino, no hace falta hacer broadcast
+            return
+
+        self.logger.info(f"[ARP] Broadcast controlado para {dst_ip}, origen: {src_ip}")
+
         for dpid in self.arp_handler.access_ports:
             for port in self.arp_handler.access_ports[dpid]:
+                # Si no está en la tabla de acceso, significa que aún no hay host conocido en ese puerto
                 if (dpid, port) not in self.arp_handler.access_table:
+                    if dpid not in self.datapaths:
+                        continue  # Puede que el datapath aún no esté registrado
                     datapath = self.datapaths[dpid]
                     out = self._build_packet_out(
-                        datapath, datapath.ofproto.OFP_NO_BUFFER,
-                        datapath.ofproto.OFPP_CONTROLLER, port, msg.data)
+                        datapath, ofproto.OFP_NO_BUFFER,
+                        ofproto.OFPP_CONTROLLER, port, msg.data)
                     datapath.send_msg(out)
+
 
     def shortest_forwarding(self, msg, eth_type, ip_src, ip_dst):
         datapath = msg.datapath
