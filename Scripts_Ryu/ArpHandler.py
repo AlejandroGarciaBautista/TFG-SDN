@@ -2,7 +2,7 @@ from ryu.base import app_manager
 from ryu.controller import ofp_event
 from ryu.controller.handler import MAIN_DISPATCHER, set_ev_cls
 from ryu.ofproto import ofproto_v1_3
-from ryu.lib.packet import packet, ethernet, ether_types, ipv4, arp
+from ryu.lib.packet import packet, ethernet, ether_types, ipv4, arp, vlan
 from ryu.topology import api as topo_api
 from ryu.topology import event as topo_event
 import networkx as nx
@@ -16,7 +16,8 @@ class ArpHandler(app_manager.RyuApp):
         super(ArpHandler, self).__init__(*args, **kwargs)
         self.topology_api_app = self
         self.link_to_port = {}
-        self.access_table = {}
+        # Ahora la tabla mapea (dpid, puerto, vlan_id) -> set de (ip, mac)
+        self.access_table = {} # dict[(dpid, port_no, vlan)] = set((ip, mac))
         self.switch_port_table = {}
         self.access_ports = {}
         self.interior_ports = {}
@@ -95,71 +96,125 @@ class ArpHandler(app_manager.RyuApp):
         arp_pkt = pkt.get_protocol(arp.arp)
         ip_pkt = pkt.get_protocol(ipv4.ipv4)
 
+        vlan_hdr = pkt.get_protocol(vlan.vlan)
+        vid = vlan_hdr.vid if vlan_hdr else 0
+
         if eth_type == ether_types.ETH_TYPE_LLDP:
             return
 
         if ip_pkt:
-            self.register_access_info(datapath.id, in_port, ip_pkt.src, eth_pkt.src)
-
+            self.register_access_info(datapath.id, in_port, vid, ip_pkt.src, eth_pkt.src)
         if arp_pkt:
-            self.register_access_info(datapath.id, in_port, arp_pkt.src_ip, arp_pkt.src_mac)
+            self.register_access_info(datapath.id, in_port, vid, arp_pkt.src_ip, arp_pkt.src_mac)
 
-    def register_access_info(self, dpid, in_port, ip, mac):
-        if in_port in self.access_ports.get(dpid, set()):
-            current = self.access_table.get((dpid, in_port))
-            if current != (ip, mac):
-                self.access_table[(dpid, in_port)] = (ip, mac)
+    def register_access_info(self, dpid, port_no, vlan_id, ip, mac):
+        """Guarda en self.access_table[(dpid,port,vlan_id)] un set de tuplas (ip,mac)."""
+        if port_no not in self.access_ports.get(dpid, ()):
+            return
+        key = (dpid, port_no, vlan_id)
+        hostset = self.access_table.setdefault(key, set())
+        if (ip, mac) not in hostset:
+            hostset.add((ip, mac))
+            self.logger.info(f"Nuevo host en {dpid}/{port_no}/VLAN-{vlan_id}: {ip}/{mac}")
 
-    def get_host_location(self, host_ip):
-        for (dpid, port), (ip, _) in self.access_table.items():
-            if ip == host_ip:
-                return (dpid, port)
+    def get_host_location(self, host_ip, vlan_id=None):
+        """
+        Si vlan_id es None busca en todas; si se da, busca sólo en esa VLAN.
+        Devuelve tupla (dpid, puerto, vlan_id) o None.
+        """
+        for (dpid, port, vid), hosts in self.access_table.items():
+            if vlan_id is not None and vid != vlan_id:
+                continue
+            for ip, mac in hosts:
+                if ip == host_ip:
+                    return (dpid, port, vid)
         return None
 
     def get_datapath(self, dpid):
         return self.dps.get(dpid) or topo_api.get_switch(self, dpid)[0].dp
 
-    def set_shortest_path(self, ip_src, ip_dst, src_dpid, dst_dpid, to_port_no, to_dst_match, pre_actions=[]):
+    def set_shortest_path(self, ip_src, ip_dst, src_dpid, dst_dpid,
+                          to_port_no, vlan_id=0, pre_actions=[]):
+        """
+        Instala en los switches el camino más corto (ECMP round-robin) entre
+        src_dpid y dst_dpid para el par (ip_src, ip_dst), diferenciando por VLAN.
+        Devuelve el puerto de salida en src_dpid por donde enviar el paquete.
+        """
+        # 1) ¿Hay camino?
         if not nx.has_path(self.graph, src_dpid, dst_dpid):
+            self.logger.warning(f"No hay camino {src_dpid}→{dst_dpid}")
             return 0
 
+        # 2) Selección ECMP de la ruta
         all_paths = list(nx.all_shortest_paths(self.graph, src_dpid, dst_dpid))
+        key_ecmp = (src_dpid, dst_dpid)
+        idx = self.ecmp_rr_counters.get(key_ecmp, 0)
+        path = all_paths[idx % len(all_paths)]
+        self.ecmp_rr_counters[key_ecmp] = idx + 1
 
-        key = (src_dpid, dst_dpid)
-        rr_index = self.ecmp_rr_counters.get(key, 0)
-        selected_path = all_paths[rr_index % len(all_paths)]
-        self.ecmp_rr_counters[key] = (rr_index + 1)
+        # 3) Construir el match OF, con o sin VLAN
+        dp0 = self.get_datapath(src_dpid)
+        parser = dp0.ofproto_parser
+        ofp = dp0.ofproto
 
-        if len(selected_path) == 1:
-            dp = self.get_datapath(src_dpid)
-            actions = [dp.ofproto_parser.OFPActionOutput(to_port_no)]
-            self.add_flow(dp, 10, to_dst_match, pre_actions + actions)
-            return to_port_no
+        if vlan_id and vlan_id != 0:
+            # match VLAN-tagged
+            match = parser.OFPMatch(
+                eth_type=ether_types.ETH_TYPE_IP,
+                vlan_vid=(ofp.OFPVID_PRESENT | vlan_id),
+                ipv4_src=ip_src,
+                ipv4_dst=ip_dst
+            )
+            # antes de enviar al host final haremos pop_vlan()
+            pop = parser.OFPActionPopVlan()
         else:
-            self.install_path(to_dst_match, selected_path, pre_actions)
-            dst_dp = self.get_datapath(dst_dpid)
-            actions = [dst_dp.ofproto_parser.OFPActionOutput(to_port_no)]
-            self.add_flow(dst_dp, 10, to_dst_match, pre_actions + actions)
+            # match untagged
+            match = parser.OFPMatch(
+                eth_type=ether_types.ETH_TYPE_IP,
+                ipv4_src=ip_src,
+                ipv4_dst=ip_dst
+            )
+            pop = None
 
-            u, v = selected_path[0], selected_path[1]
-            edges_data = list(self.graph.get_edge_data(u, v).items())
+        # 4) Si es camino de un solo salto (host en el mismo switch)
+        if len(path) == 1:
+            dp = dp0
+            actions = []
+            if pop: actions.append(pop)
+            actions.append(parser.OFPActionOutput(to_port_no))
+            self.add_flow(dp, 10, match, pre_actions + actions)
+            return to_port_no
 
-            # Si no hay enlaces, retorna 0 (esto no debería pasar en caminos válidos)
-            if not edges_data:
-                self.logger.warning(f"No hay enlaces físicos entre {u} y {v}")
-                return 0
+        # 5) Instalar flujos en todos los switches intermedios
+        self.install_path(match, path, pre_actions)
 
-            # Usamos una clave que también incluye el número total de enlaces posibles
-            key = (u, v, len(edges_data))  # diferencia enlaces cambiantes
-            rr_index = self.edge_rr_counters.get(key, 0)
-            selected_edge = edges_data[rr_index % len(edges_data)][1]
+        # 6) Instalar flujo en el switch destino (pop_vlan + salida a host)
+        dst_dp = self.get_datapath(dst_dpid)
+        parser_dst = dst_dp.ofproto_parser
+        actions = []
+        if pop: actions.append(parser_dst.OFPActionPopVlan())
+        actions.append(parser_dst.OFPActionOutput(to_port_no))
+        self.add_flow(dst_dp, 10, match, pre_actions + actions)
 
-            # Actualizamos el índice RR solo si hay más de un enlace
-            if len(edges_data) > 1:
-                self.edge_rr_counters[key] = rr_index + 1
+        # 7) Calcular puerto de salida en el primer switch (src_dpid)
+        u, v = path[0], path[1]
+        edges = list(self.graph.get_edge_data(u, v).items())
+        if not edges:
+            self.logger.warning(f"No hay enlace físico {u}→{v}")
+            return 0
 
-            self.logger.info(f"Usando enlace {u} -> {v} por puerto {selected_edge['src_port']} (opción {rr_index % len(edges_data) + 1} de {len(edges_data)})")
-            return selected_edge['src_port']
+        key_edge = (u, v, len(edges))
+        idx2 = self.edge_rr_counters.get(key_edge, 0)
+        sel_edge = edges[idx2 % len(edges)][1]
+        if len(edges) > 1:
+            self.edge_rr_counters[key_edge] = idx2 + 1
+
+        out_port = sel_edge['src_port']
+        self.logger.info(
+            f"ECMP enlace {u}→{v} puerto {out_port} "
+            f"(opción {idx2 % len(edges)+1}/{len(edges)})"
+        )
+        return out_port
 
 
     def install_path(self, match, path, pre_actions=[]):
