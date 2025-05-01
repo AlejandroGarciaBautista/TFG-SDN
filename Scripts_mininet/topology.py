@@ -70,8 +70,9 @@ def create_spine_leaf_topology(spine_count, leaf_count, hosts_per_leaf,
 
     # Mapeo de hosts con VLANs y sus IPs
     hosts_vlan = {
-        'h1':  {100: '10.0.100.1/24', 200: '10.0.200.1/24'},
-        'h20': {100: '10.0.100.2/24', 200: '10.0.200.2/24'}
+        'h1':  {10: '10.0.10.1/24', 20: '10.0.20.1/24'},
+        'h20': {10: '10.0.10.2/24', 20: '10.0.20.2/24'},
+        'h40': {30: '10.0.30.2/24'}
     }
 
     # Configurar subinterfaces VLAN y trunks en los switches
