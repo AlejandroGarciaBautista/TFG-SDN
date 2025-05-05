@@ -10,7 +10,7 @@ def parse_arguments():
 
     parser.add_argument("--spine", type=int, default=2, help="Cantidad de switches spine (por defecto: 2)")
     parser.add_argument("--leaf", type=int, default=4, help="Cantidad de switches leaf (por defecto: 4)")
-    parser.add_argument("--hosts", type=int, default=12, help="Cantidad de hosts por switch leaf (por defecto: 2)")
+    parser.add_argument("--hosts", type=int, default=12, help="Cantidad de hosts por switch leaf (por defecto: 12)")
     parser.add_argument("--bw", type=int, default=1000, help="Capacidad de los enlaces Uplink en Mbps (por defecto: 1000 (máximo permitido))")
     parser.add_argument("-c", type=str, default="192.168.56.101", help="Dirección IP del controlador SDN (por defecto: 192.168.56.101)")
 
@@ -64,7 +64,7 @@ def create_spine_leaf_topology(spine_switches, leaf_switches, hosts_per_leaf, li
         'h1':  {10: '10.0.10.1/24'},
         'h20': {10: '10.0.10.2/24', 20: '10.0.20.1/24'},
         'h25': {10: '10.0.10.3/24', 20: '10.0.20.2/24'},
-        'h40': {30: '10.0.30.1/24'}
+        'h40': {30: '10.0.30.1/24'}    
     }
 
     for hname, vlan_info in hosts_vlan.items():
@@ -78,21 +78,10 @@ def create_spine_leaf_topology(spine_switches, leaf_switches, hosts_per_leaf, li
             host.cmd(f"ip addr add {ip} dev {subintf}")
             host.cmd(f"ip link set dev {subintf} up")
 
-            # 1.a) Añadir ruta a la subred VLAN sobre la subinterfaz
-            octs = ip.split('/')[0].split('.')
-            net_addr = f"{octs[0]}.{octs[1]}.{octs[2]}.0/{ip.split('/')[1]}"
-            host.cmd(f"ip route add {net_addr} dev {subintf}")
-
         # Activar la interfaz base también
         host.cmd(f"ip link set dev {base_intf} up")
 
-        # 2) Activar ARP filtering para evitar ARP flux
-        host.cmd("sysctl -w net.ipv4.conf.all.arp_filter=1")
-        host.cmd(f"sysctl -w net.ipv4.conf.{base_intf}.arp_filter=1")
-        for vid in vlan_info:
-            host.cmd(f"sysctl -w net.ipv4.conf.{base_intf}.{vid}.arp_filter=1")
-
-        # 3) Configurar el trunk VLAN en el switch que conecta a este host
+        # 2) Configurar el trunk VLAN en el switch que conecta a este host
         link = None
         for sw in net.switches:
             conns = host.connectionsTo(sw)
@@ -101,10 +90,25 @@ def create_spine_leaf_topology(spine_switches, leaf_switches, hosts_per_leaf, li
                 break
         if not link:
             raise RuntimeError(f"No se encontró conexión entre {hname} y ningún switch")
+        
         sw = link[1].node
         sw_intf = link[1].name
-        vids = ",".join(str(v) for v in vlan_info)
-        sw.cmd(f"ovs-vsctl set port {sw_intf} trunks={vids}")
+        vids = ",".join(str(v) for v in vlan_info) 
+        sw.cmd(f"ovs-vsctl set port {sw_intf} vlan_mode=trunk trunks={vids}")
+
+    # --- APLICAR MODO HYBRID EN ENLACES ENTRE SWITCHES ----------
+    # Para cada link, si ambos extremos son OVSSwitch, configúralo
+    for link in net.links:
+        sw1, sw2 = link.intf1.node, link.intf2.node
+        if isinstance(sw1, OVSSwitch) and isinstance(sw2, OVSSwitch):
+            # en sw1
+            port1 = link.intf1.name
+            sw1.cmd(f"ovs-vsctl set port {port1} "
+                    f"vlan_mode=hybrid trunks=10,20,30")
+            # en sw2
+            port2 = link.intf2.name
+            sw2.cmd(f"ovs-vsctl set port {port2} "
+                    f"vlan_mode=hybrid trunks=10,20,30")
 
     # Mostrar CLI de Mininet
     CLI(net)

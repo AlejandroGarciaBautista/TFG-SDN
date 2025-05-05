@@ -147,7 +147,6 @@ class ArpHandler(app_manager.RyuApp):
         vlan_hdr = pkt.get_protocol(vlan.vlan)
         vid = vlan_hdr.vid if vlan_hdr else 0
 
-
         # Ignorar LLDP (usado para descubrimiento de topología)
         if eth_type == ether_types.ETH_TYPE_LLDP:
             return
