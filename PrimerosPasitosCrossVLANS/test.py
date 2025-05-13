@@ -138,6 +138,8 @@ class ShortestPath(app_manager.RyuApp):
         ip_pkt = pkt.get_protocol(ipv4.ipv4)
         if not ip_pkt:
             return
+        
+        self.logger.info(f"[IP] {ip_pkt.src} → {ip_pkt.dst}")
 
         src_vlan = self.get_vlan_from_ip(ip_pkt.src)
         dst_vlan = self.get_vlan_from_ip(ip_pkt.dst)
@@ -306,50 +308,64 @@ class ShortestPath(app_manager.RyuApp):
 # ---------------------------------------------------
 
 
+    # En la clase ShortestPath, dentro de test.py
     def cross_vlan_shortest_forwarding(self, msg, ip_src, ip_dst):
+        """
+        Reenvío proactivo ECMP para tráfico entre VLANs distintas,
+        instalando flujos tanto de IP como de ARP en datapaths y
+        reenviando sólo el paquete inicial desde el switch origen.
+        """
         dp = msg.datapath
-        ofp = dp.ofproto
-        parser = dp.ofproto_parser
         in_port = msg.match['in_port']
 
-        dst_vlan = self.get_vlan_from_ip(ip_dst)
-
+        # 1) Localiza switches de origen y destino y puerto de acceso
         res = self.get_sw(dp.id, in_port, ip_src, ip_dst)
         if not res:
             return
-        src_sw, dst_sw, out_port = res
+        src_sw, dst_sw, dst_port = res
 
-        # En el switch origen: quitar VLAN
-        actions_src = [parser.OFPActionPopVlan()]
+        src_dp = dp
+        dst_dp = self.datapaths.get(dst_sw)
+        if not dst_dp:
+            return
 
-        # Instalar flujo en switch origen sin VLAN (underlay)
-        port_no_src = self.arp_handler.set_shortest_path(
-            ip_src, ip_dst, src_sw, dst_sw,
-            to_port_no=out_port,
-            vlan_id=0,  # Sin VLAN
-            pre_actions=actions_src
+        # 2) Calcula VLAN de origen/destino (0 si underlay)
+        src_vlan = self.get_vlan_from_ip(ip_src) or 0
+        dst_vlan = self.get_vlan_from_ip(ip_dst) or 0
+
+        # 3) Pre-acciones: quitar cualquier etiqueta VLAN previa
+        pop_src = src_dp.ofproto_parser.OFPActionPopVlan()
+        pop_dst = dst_dp.ofproto_parser.OFPActionPopVlan()
+
+        # 4) Instala ECMP + reetiquetado IP&ARP en datapaths para ida
+        first_out = self.arp_handler.cross_set_shortest_path(
+            ip_src, ip_dst,
+            src_sw, dst_sw,
+            to_port_no=dst_port,
+            vlan_id=src_vlan,
+            pre_actions=[pop_src]
         )
 
-        # Instalar flujo en switch destino, push VLAN al entregar al host
-        dp_dst = self.datapaths.get(dst_sw)
-        if dp_dst:
-            parser_dst = dp_dst.ofproto_parser
-            actions_dst = [
-                parser_dst.OFPActionPushVlan(ether_types.ETH_TYPE_8021Q),
-                parser_dst.OFPActionSetField(vlan_vid=(ofp.OFPVID_PRESENT | dst_vlan)),
-                parser_dst.OFPActionOutput(out_port)
-            ]
+        # 5) Instala ECMP + reetiquetado IP&ARP en datapaths para la vuelta
+        self.arp_handler.cross_set_shortest_path(
+            ip_dst, ip_src,
+            dst_sw, src_sw,
+            to_port_no=in_port,
+            vlan_id=dst_vlan,
+            pre_actions=[pop_dst]
+        )
 
-            match_dst = parser_dst.OFPMatch(
-                eth_type=ether_types.ETH_TYPE_IP,
-                ipv4_src=ip_src,
-                ipv4_dst=ip_dst
-            )
+        # 6) Reenvía el paquete que ha causado el PacketIn,
+        #    sólo por el primer salto del camino ida
+        self.send_packet_out(
+            src_dp,
+            msg.buffer_id,
+            in_port,
+            first_out,
+            msg.data
+        )
 
-            self.add_flow(dp_dst, priority=10, match=match_dst, actions=actions_dst)
 
-        # Enviar el paquete actual sin VLAN
-        self.send_packet_out(dp, msg.buffer_id, in_port, port_no_src, msg.data)
 
 
 

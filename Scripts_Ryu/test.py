@@ -32,7 +32,6 @@ class ShortestPath(app_manager.RyuApp):
         }
         # Pares de VLAN permitidos
         self.allowed_pairs = {
-            (10,10), (20,20), (30,30),
             (10,30), (30,10)
         }
 
@@ -96,8 +95,12 @@ class ShortestPath(app_manager.RyuApp):
         msg = ev.msg
         dp = msg.datapath
         in_port = msg.match['in_port']
-        pkt = packet.Packet(msg.data)
 
+        if in_port not in self.arp_handler.access_ports.get(dp.id, ()):
+            return
+
+        pkt = packet.Packet(msg.data)
+        
         # 1) Ignorar LLDP
         eth = pkt.get_protocol(ethernet.ethernet)
         if not eth or eth.ethertype == ether_types.ETH_TYPE_LLDP:
@@ -107,7 +110,6 @@ class ShortestPath(app_manager.RyuApp):
         #    - Ambos fuera de overlay → underlay (vlan_id=0)
         #    - Ambos en la misma VLAN → overlay intra-VLAN
         #    - Uno en overlay y otro no → DROP
-
         arp_pkt = pkt.get_protocol(arp.arp)
         if arp_pkt:
             src_vlan = self.get_vlan_from_ip(arp_pkt.src_ip)
@@ -122,7 +124,7 @@ class ShortestPath(app_manager.RyuApp):
                 return
             elif (src_vlan, dst_vlan) in self.allowed_pairs:
                 self.logger.info(f"[CROSS-ARP] VLAN Destino: {arp_pkt.dst_ip} -> {dst_vlan}")
-                self.arp_forwarding(msg, arp_pkt.src_ip, arp_pkt.dst_ip, dst_vlan)
+                self.cross_arp_forwarding(msg, arp_pkt.src_ip, arp_pkt.dst_ip, dst_vlan)
                 return
             elif src_vlan != dst_vlan:
                 # ARP entre VLANs distintas → descartar
@@ -139,15 +141,15 @@ class ShortestPath(app_manager.RyuApp):
         ip_pkt = pkt.get_protocol(ipv4.ipv4)
         if not ip_pkt:
             return
+        
+        self.logger.info(f"[IP] {ip_pkt.src} → {ip_pkt.dst}")
 
         src_vlan = self.get_vlan_from_ip(ip_pkt.src)
         dst_vlan = self.get_vlan_from_ip(ip_pkt.dst)
 
         # A) Tráfico underlay: ambos fuera de la red overlay
         if src_vlan is None and dst_vlan is None:
-            self.shortest_forwarding(msg, eth.ethertype,
-                                     ip_pkt.src, ip_pkt.dst,
-                                     vlan_id=0)
+            self.shortest_forwarding(msg, ip_pkt.src, ip_pkt.dst)
             return
 
         # B) Uno en overlay y otro no → DROP
@@ -158,15 +160,13 @@ class ShortestPath(app_manager.RyuApp):
         # C) Ambos en overlay
         # C2) Intra-VLAN overlay
         if src_vlan == dst_vlan:
-            self.shortest_forwarding(msg, eth.ethertype,
-                                     ip_pkt.src, ip_pkt.dst, src_vlan)
+            self.shortest_forwarding(msg, ip_pkt.src, ip_pkt.dst)
         
         # C1) Diferentes VLANs --> No se permite la comunicación a no ser que este permitida
         if (src_vlan, dst_vlan) in self.allowed_pairs:
             self.logger.info(f"Conexión IP {ip_pkt.src}({src_vlan})→{ip_pkt.dst}({dst_vlan}): permitida")
-            self.shortest_forwarding(msg, eth.ethertype,
-                                    ip_pkt.src, ip_pkt.dst,
-                                    vlan_id=src_vlan)
+            # Función de reenvío para VLAN cruzada
+            self.cross_vlan_shortest_forwarding(msg, ip_pkt.src, ip_pkt.dst, eth.src, eth.dst)
             return
         
         if src_vlan != dst_vlan:
@@ -217,58 +217,11 @@ class ShortestPath(app_manager.RyuApp):
                 actions=actions
             )
             dp_dst.send_msg(out)
+
+            # self.pack_vlan(msg, dst_vid, out_port, ofp_dst.OFPP_CONTROLLER)
+
             return
 
-        if self.get_vlan_from_ip(src_ip) != self.get_vlan_from_ip(dst_ip):
-            self.logger.info(f"[CROSS-ARP] Broadcast VLAN {vlan_id} → {self.get_vlan_from_ip(dst_ip)} "
-                     f"para {dst_ip} desde {src_ip}")
-            dst_vlan = self.get_vlan_from_ip(dst_ip)
-
-             # ——> AQUÍ insertamos el debug:
-            pkt = packet.Packet(msg.data)
-            # Mostrar raw bytes en hex:
-            self.logger.info("RAW PKT: %s", msg.data.hex())
-            # Iterar protocolos para ver cada cabecera:
-            for p in pkt.protocols:
-                self.logger.info("PROTO: %s", p)
-            # ——> FIN debug
-
-            for dpid, ports in self.arp_handler.access_ports.items():
-                for port in ports:
-                    key = (dpid, port, dst_vlan)
-                    if key in self.arp_handler.access_table:
-                        continue  # ya lo enviamos antes
-
-                    dp_iter = self.datapaths.get(dpid)
-                    if not dp_iter:
-                        continue
-                    parser_iter = dp_iter.ofproto_parser
-                    ofp_iter    = dp_iter.ofproto
-
-                    # 1) Sacar la VLAN original
-                    actions = [ parser_iter.OFPActionPopVlan() ]
-
-                    # 2) Poner la VLAN de destino
-                    actions += [
-                        # Push 802.1Q ethertype
-                        parser_iter.OFPActionPushVlan(ether_types.ETH_TYPE_8021Q),
-                        # Fijar el VLAN ID
-                        parser_iter.OFPActionSetField(
-                            vlan_vid=(ofp_iter.OFPVID_PRESENT | dst_vlan)
-                        )
-                    ]
-
-                    # 3) Enviar al puerto
-                    actions.append(parser_iter.OFPActionOutput(port))
-
-                    out = parser_iter.OFPPacketOut(
-                        datapath=dp_iter,
-                        buffer_id=ofp_iter.OFP_NO_BUFFER,
-                        in_port=ofp_iter.OFPP_CONTROLLER,
-                        data=msg.data,
-                        actions=actions
-                    )
-                    dp_iter.send_msg(out)
         else: # 2) Broadcast controlado: solo a puertos de acceso de la VLAN
             self.logger.info(f"[ARP] Broadcast VLAN {vlan_id} para {dst_ip} desde {src_ip}")
             for dpid, ports in self.arp_handler.access_ports.items():
@@ -288,40 +241,177 @@ class ShortestPath(app_manager.RyuApp):
                         )
                         dp_iter.send_msg(out)
 
-
-    def shortest_forwarding(self, msg, eth_type,
-                            ip_src, ip_dst, vlan_id):
+    def shortest_forwarding(self, msg, ip_src, ip_dst):
         dp = msg.datapath
         in_port = msg.match['in_port']
 
         # Determinar switch origen y destino (incluye VLAN)
-        res = self.get_sw(dp.id, in_port, ip_src, ip_dst, vlan_id)
+        res = self.get_sw(dp.id, in_port, ip_src, ip_dst)
         if not res:
+            self.logger.info(f"DROP IP {ip_src}→{ip_dst}: no se encontró ruta")
             return
         src_sw, dst_sw, out_port = res
-
+            
         # Instalar ruta (ECMP) y reenviar
         port_no = self.arp_handler.set_shortest_path(
             ip_src, ip_dst, src_sw, dst_sw,
-            to_port_no=out_port,
-            vlan_id=self.get_vlan_from_ip(ip_src), pre_actions=[]
+            to_port_no=out_port
         )
 
         self.send_packet_out(dp, msg.buffer_id,
-                             in_port, port_no, msg.data)
+                            in_port, port_no, msg.data)
 
-    def get_sw(self, dpid, in_port, src_ip, dst_ip, vlan_id):
-        # Validar puerto de acceso
-        # src_loc = self.arp_handler.get_host_location(src_ip, vlan_id)
+
+# ---------------------------------------------------
+
+    def cross_arp_forwarding(self, msg, src_ip, dst_ip, vlan_id):
+        """
+        Proxy ARP cross-VLAN:
+        - Si conocemos la ubicación del host destino, unicast ARP (con pop+push VLAN fijo).
+        - Si no, broadcast controlado en la VLAN destino (también con pop+push).
+        """
+        dp = msg.datapath
+        parser = dp.ofproto_parser
+        ofp = dp.ofproto
+
+        # 1) ¿Conocemos la ubicación del destino?
+        dst_loc = self.arp_handler.get_host_location(dst_ip, vlan_id)
+        if dst_loc:
+            dst_dpid, out_port, dst_vid = dst_loc
+            dp_dst = self.datapaths.get(dst_dpid)
+            if not dp_dst:
+                return
+
+            parser_dst = dp_dst.ofproto_parser
+            ofp_dst    = dp_dst.ofproto
+
+            # —— Unicast ARP: siempre POP + PUSH VLAN destino + OUTPUT ——
+            actions = [
+                # 1) Pop de cualquier tag previa (no hace nada si no tenía)
+                parser_dst.OFPActionPopVlan(),
+                # 2) Push del tag 802.1Q
+                parser_dst.OFPActionPushVlan(ether_types.ETH_TYPE_8021Q),
+                # 3) SetField con la VLAN destino
+                parser_dst.OFPActionSetField(
+                    vlan_vid=(ofp_dst.OFPVID_PRESENT | dst_vid)
+                ),
+                # 4) Salida al puerto de acceso
+                parser_dst.OFPActionOutput(out_port)
+            ]
+
+            out = parser_dst.OFPPacketOut(
+                datapath=dp_dst,
+                buffer_id=ofp_dst.OFP_NO_BUFFER,
+                in_port=ofp_dst.OFPP_CONTROLLER,
+                data=msg.data,
+                actions=actions
+            )
+            dp_dst.send_msg(out)
+            return
+
+        # 2) Broadcast controlado: ARP request cuando no conocemos la MAC
+        for dpid, ports in self.arp_handler.access_ports.items():
+            for port in ports:
+                key = (dpid, port, vlan_id)
+                if key in self.arp_handler.access_table:
+                    continue  # ya enviado a este puerto+VLAN
+
+                dp_iter = self.datapaths.get(dpid)
+                if not dp_iter:
+                    continue
+                parser_iter = dp_iter.ofproto_parser
+                ofp_iter    = dp_iter.ofproto
+
+                # —— Broadcast ARP: POP + PUSH VLAN destino + OUTPUT ——
+                actions = [
+                    parser_iter.OFPActionPopVlan(),
+                    parser_iter.OFPActionPushVlan(ether_types.ETH_TYPE_8021Q),
+                    parser_iter.OFPActionSetField(
+                        vlan_vid=(ofp_iter.OFPVID_PRESENT | vlan_id)
+                    ),
+                    parser_iter.OFPActionOutput(port)
+                ]
+
+                out = parser_iter.OFPPacketOut(
+                    datapath=dp_iter,
+                    buffer_id=ofp_iter.OFP_NO_BUFFER,
+                    in_port=ofp_iter.OFPP_CONTROLLER,
+                    data=msg.data,
+                    actions=actions
+                )
+                dp_iter.send_msg(out)
+
+
+    def cross_vlan_shortest_forwarding(self, msg, ip_src, ip_dst, eth_src, eth_dst):
+        """
+        Reenvío proactivo ECMP para tráfico entre VLANs distintas,
+        instalando flujos tanto de IP como de ARP en datapaths y
+        reenviando sólo el paquete inicial desde el switch origen.
+        """
+        dp = msg.datapath
+        ofp = dp.ofproto
+        parser = dp.ofproto_parser
+        in_port = msg.match['in_port']
+
+        # 1) Localiza switches de origen y destino y puerto de acceso
+        res = self.get_sw(dp.id, in_port, ip_src, ip_dst)
+        if not res:
+            return
+        src_sw, dst_sw, dst_port = res
+
+        src_dp = dp
+        dst_dp = self.datapaths.get(dst_sw)
+        if not dst_dp:
+            return
+
+        # 1) Determinar VLAN de cada IP
+        src_vlan = self.get_vlan_from_ip(ip_src)
+        dst_vlan = self.get_vlan_from_ip(ip_dst)
+
+        # 2) Ida: del leaf-origen al leaf-destino
+        first_out = self.arp_handler.cross_set_shortest_path(
+            ip_src, ip_dst,
+            src_sw, dst_sw,
+            to_port_no=dst_port,
+            orig_vlan=src_vlan,
+            dest_vlan=dst_vlan
+        )
+
+        # Si no encontró ruta (p.ej. mismo switch), reenvía directamente al puerto de acceso
+        if first_out is None:
+            self.logger.info("Mismo switch o path=1, salgo por el puerto de host %d", dst_port)
+            first_out = dst_port
+
+        # 3) Vuelta: invertimos IPs y VLANs
+        self.arp_handler.cross_set_shortest_path(
+            ip_dst, ip_src,
+            dst_sw, src_sw,
+            to_port_no=in_port,
+            orig_vlan=dst_vlan,
+            dest_vlan=src_vlan
+        )
+
+        # 5) Envio el PacketOut con el paquete IP inicial
+        self.send_packet_out(
+            src_dp, msg.buffer_id, in_port,
+            first_out, msg.data
+        )
+
+# ---------------------------------------------------
+
+    def get_sw(self, dpid, in_port, src_ip, dst_ip):
+        src_vlan = 0
+        if self.get_vlan_from_ip(src_ip):
+            src_vlan = self.get_vlan_from_ip(src_ip)
+         
         src_loc = self.arp_handler.get_host_location(src_ip, self.get_vlan_from_ip(src_ip))
         if in_port in self.arp_handler.access_ports.get(dpid, ()):
-            if (dpid, in_port, vlan_id) != src_loc:
+            if (dpid, in_port, src_vlan) != src_loc:
                 return None
             src_sw = dpid
         else:
             src_sw = dpid
 
-        # dst_loc = self.arp_handler.get_host_location(dst_ip, vlan_id)
         dst_loc = self.arp_handler.get_host_location(dst_ip, self.get_vlan_from_ip(dst_ip))
         if dst_loc:
             return (src_sw, dst_loc[0], dst_loc[1])

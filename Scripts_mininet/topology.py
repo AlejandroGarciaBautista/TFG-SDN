@@ -74,9 +74,11 @@ def create_spine_leaf_topology(spine_switches, leaf_switches, hosts_per_leaf, li
         # 1) Crear y levantar subinterfaces VLAN + asignar IP
         for vid, ip in vlan_info.items():
             subintf = f"{base_intf}.{vid}"
+            # gw_ip = f"{ip.rsplit('.', 1)[0]}.254"
             host.cmd(f"ip link add link {base_intf} name {subintf} type vlan id {vid}")
             host.cmd(f"ip addr add {ip} dev {subintf}")
             host.cmd(f"ip link set dev {subintf} up")
+            # host.cmd(f"ip route add default via {gw_ip} dev {subintf}")
 
         # Activar la interfaz base también
         host.cmd(f"ip link set dev {base_intf} up")
@@ -109,6 +111,35 @@ def create_spine_leaf_topology(spine_switches, leaf_switches, hosts_per_leaf, li
             port2 = link.intf2.name
             sw2.cmd(f"ovs-vsctl set port {port2} "
                     f"vlan_mode=hybrid trunks=10,20,30")
+
+    for hostname in ("h1", "h40"):
+        host = net.get(hostname)
+        # dentro del namespace de hX, las interfaces se llaman eth0, eth0.10, etc.
+        interfaces = ["eth0", "eth0.10", "eth0.20", "eth0.30"]
+        for iface in interfaces:
+            host.cmd(f"sysctl -w net.ipv4.conf.{hostname}-{iface}.arp_accept=1")
+            # host.cmd(f"sysctl -w net.ipv4.conf.{hostname}-{iface}.arp_filter=1")
+            # host.cmd(f"sysctl -w net.ipv4.conf.{hostname}-{iface}.arp_ignore=1")
+            # host.cmd(f"sysctl -w net.ipv4.conf.{hostname}-{iface}.arp_announce=2")
+    #     host.cmd(f"arptables -A OUTPUT -o {hostname}-eth0 --source-ip 10.0.10.0/24 -j DROP")
+    #     host.cmd(f"arptables -A OUTPUT -o {hostname}-eth0 --source-ip 10.0.30.0/24 -j DROP")
+    #     host.cmd(f"arptables -A INPUT  -i {hostname}-eth0 --source-ip 10.0.10.0/24 -j DROP")
+    #     host.cmd(f"arptables -A INPUT  -i {hostname}-eth0 --source-ip 10.0.30.0/24 -j DROP")
+    
+
+    h1 = net.get("h1")
+    h40 = net.get("h40")
+
+    # h1.cmd("ip route add 10.0.30.0/24 dev h1-eth0.10")
+    # h40.cmd("ip route add 10.0.10.0/24 dev h40-eth0.30")
+
+    h40.cmd("echo '100 overlay' >> /etc/iproute2/rt_tables")
+    h40.cmd("ip rule add from 10.0.30.1/32 table overlay")
+    h40.cmd("ip route add 10.0.10.0/24 dev h40-eth0.30 table overlay")
+
+    h1.cmd("echo '100 overlay' >> /etc/iproute2/rt_tables")
+    h1.cmd("ip rule add from 10.0.10.1/32 table overlay")
+    h1.cmd("ip route add 10.0.30.0/24 dev h1-eth0.10 table overlay")
 
     # Mostrar CLI de Mininet
     CLI(net)
