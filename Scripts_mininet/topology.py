@@ -62,84 +62,56 @@ def create_spine_leaf_topology(spine_switches, leaf_switches, hosts_per_leaf, li
     # Mapeo de hosts con VLANs y sus IPs
     hosts_vlan = {
         'h1':  {10: '10.0.10.1/24'},
-        'h20': {10: '10.0.10.2/24', 20: '10.0.20.1/24'},
-        'h25': {10: '10.0.10.3/24', 20: '10.0.20.2/24'},
-        'h40': {30: '10.0.30.1/24'}    
+        'h20': {10: ['10.0.10.2/24', '10.0.10.3/24'], 20: '10.0.20.1/24'},
+        'h25': {10: '10.0.10.4/24', 20: ['10.0.20.2/24', '10.0.20.3/24']},
+        'h40': {30: '10.0.30.1/24'}
     }
 
     for hname, vlan_info in hosts_vlan.items():
         host = net.get(hname)
-        base_intf = host.intfNames()[0]  # ej. 'h1-eth0'
+        intf = host.intfNames()[0]   # p.ej. 'h20-eth0'
+        host_id = hname.lstrip('h')  # '20', '25', etc.
 
-        # 1) Crear y levantar subinterfaces VLAN + asignar IP
-        for vid, ip in vlan_info.items():
-            subintf = f"{base_intf}.{vid}"
-            # gw_ip = f"{ip.rsplit('.', 1)[0]}.254"
-            host.cmd(f"ip link add link {base_intf} name {subintf} type vlan id {vid}")
-            host.cmd(f"ip addr add {ip} dev {subintf}")
-            host.cmd(f"ip link set dev {subintf} up")
-            # host.cmd(f"ip route add default via {gw_ip} dev {subintf}")
+        created_bridges = set()   # evitar recrear el mismo bridge
+        vm_counters = {}          # contador de VMs por VLAN
 
-        # Activar la interfaz base también
-        host.cmd(f"ip link set dev {base_intf} up")
+        for vlan, ips in vlan_info.items():
+            # Normalizar a lista de IPs (para soportar >1 VM/VLAN)
+            ip_list = ips if isinstance(ips, list) else [ips]
 
-        # 2) Configurar el trunk VLAN en el switch que conecta a este host
-        link = None
-        for sw in net.switches:
-            conns = host.connectionsTo(sw)
-            if conns:
-                link = conns[0]
-                break
-        if not link:
-            raise RuntimeError(f"No se encontró conexión entre {hname} y ningún switch")
-        
-        sw = link[1].node
-        sw_intf = link[1].name
-        vids = ",".join(str(v) for v in vlan_info) 
-        sw.cmd(f"ovs-vsctl set port {sw_intf} vlan_mode=trunk trunks={vids}")
+            # 1) Crear/levantar bridge UNA sola vez por VLAN
+            if vlan not in created_bridges:
+                host.cmd(f'ip link add br{vlan} type bridge')
+                host.cmd(f'ip link set br{vlan} up')
+                # contectar la interfaz real del host al bridge
+                host.cmd(f'ip link set {intf} master br{vlan}')
+                host.cmd(f'ip link set {intf} up')
+                created_bridges.add(vlan)
 
-    # --- APLICAR MODO HYBRID EN ENLACES ENTRE SWITCHES ----------
-    # Para cada link, si ambos extremos son OVSSwitch, configúralo
-    for link in net.links:
-        sw1, sw2 = link.intf1.node, link.intf2.node
-        if isinstance(sw1, OVSSwitch) and isinstance(sw2, OVSSwitch):
-            # en sw1
-            port1 = link.intf1.name
-            sw1.cmd(f"ovs-vsctl set port {port1} "
-                    f"vlan_mode=hybrid trunks=10,20,30")
-            # en sw2
-            port2 = link.intf2.name
-            sw2.cmd(f"ovs-vsctl set port {port2} "
-                    f"vlan_mode=hybrid trunks=10,20,30")
+            # 2) Para cada IP, crear una VM lógica
+            for ip_addr in ip_list:
+                # contar VMs en esta VLAN para nombres únicos
+                vm_counters[vlan] = vm_counters.get(vlan, 0) + 1
+                count = vm_counters[vlan]
 
-    for hostname in ("h1", "h40"):
-        host = net.get(hostname)
-        # dentro del namespace de hX, las interfaces se llaman eth0, eth0.10, etc.
-        interfaces = ["eth0", "eth0.10", "eth0.20", "eth0.30"]
-        for iface in interfaces:
-            host.cmd(f"sysctl -w net.ipv4.conf.{hostname}-{iface}.arp_accept=1")
-            # host.cmd(f"sysctl -w net.ipv4.conf.{hostname}-{iface}.arp_filter=1")
-            # host.cmd(f"sysctl -w net.ipv4.conf.{hostname}-{iface}.arp_ignore=1")
-            # host.cmd(f"sysctl -w net.ipv4.conf.{hostname}-{iface}.arp_announce=2")
-    #     host.cmd(f"arptables -A OUTPUT -o {hostname}-eth0 --source-ip 10.0.10.0/24 -j DROP")
-    #     host.cmd(f"arptables -A OUTPUT -o {hostname}-eth0 --source-ip 10.0.30.0/24 -j DROP")
-    #     host.cmd(f"arptables -A INPUT  -i {hostname}-eth0 --source-ip 10.0.10.0/24 -j DROP")
-    #     host.cmd(f"arptables -A INPUT  -i {hostname}-eth0 --source-ip 10.0.30.0/24 -j DROP")
-    
+                # nombres únicos para namespace y veth
+                vm_ns     = f'C{vlan}_vm{host_id}_{count}'
+                veth_host = f'veth{vlan}_h{host_id}_{count}'
+                veth_vm   = f'veth{vlan}_vm{host_id}_{count}'
 
-    h1 = net.get("h1")
-    h40 = net.get("h40")
+                # crear namespace
+                host.cmd(f'ip netns add {vm_ns}')
 
-    # h1.cmd("ip route add 10.0.30.0/24 dev h1-eth0.10")
-    # h40.cmd("ip route add 10.0.10.0/24 dev h40-eth0.30")
+                # crear par veth y atarlo al bridge
+                host.cmd(f'ip link add {veth_host} type veth peer name {veth_vm}')
+                host.cmd(f'ip link set {veth_host} master br{vlan}')
+                host.cmd(f'ip link set {veth_host} up')
 
-    h40.cmd("echo '100 overlay' >> /etc/iproute2/rt_tables")
-    h40.cmd("ip rule add from 10.0.30.1/32 table overlay")
-    h40.cmd("ip route add 10.0.10.0/24 dev h40-eth0.30 table overlay")
-
-    h1.cmd("echo '100 overlay' >> /etc/iproute2/rt_tables")
-    h1.cmd("ip rule add from 10.0.10.1/32 table overlay")
-    h1.cmd("ip route add 10.0.30.0/24 dev h1-eth0.10 table overlay")
+                # mover extremo VM a la namespace y configurarlo
+                host.cmd(f'ip link set {veth_vm} netns {vm_ns}')
+                host.cmd(f'ip netns exec {vm_ns} ip link set {veth_vm} up')
+                host.cmd(f'ip netns exec {vm_ns} ip address add {ip_addr} dev {veth_vm}')
+                host.cmd(f'ip netns exec {vm_ns} ip link set lo up')
 
     # Mostrar CLI de Mininet
     CLI(net)
