@@ -1,7 +1,6 @@
 from ryu.base import app_manager
 from ryu.controller import ofp_event
-from ryu.controller.handler import MAIN_DISPATCHER, CONFIG_DISPATCHER
-from ryu.controller.handler import set_ev_cls
+from ryu.controller.handler import MAIN_DISPATCHER, CONFIG_DISPATCHER, set_ev_cls
 from ryu.ofproto import ofproto_v1_3
 from ryu.lib.packet import packet, ethernet, ipv4, arp, ether_types
 from ryu.base.app_manager import lookup_service_brick
@@ -38,6 +37,19 @@ class ShortestPath(app_manager.RyuApp):
         ignore_match = parser.OFPMatch(eth_type=ether_types.ETH_TYPE_IPV6)
         self.add_flow(datapath, 65534, ignore_match, [])
 
+
+        # Regla para ARP → controller
+        match = parser.OFPMatch(eth_type=0x0806)
+        actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER,
+                                        ofproto.OFPCML_NO_BUFFER)]
+        inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS,
+                                            actions)]
+        mod = parser.OFPFlowMod(datapath=datapath,
+                                priority=300,
+                                match=match,
+                                instructions=inst)
+        datapath.send_msg(mod)
+
     def add_flow(self, dp, p, match, actions, idle_timeout=0, hard_timeout=0):
         parser = dp.ofproto_parser
         ofproto = dp.ofproto
@@ -67,24 +79,45 @@ class ShortestPath(app_manager.RyuApp):
 
         if arp_pkt and is_connection_allowed(arp_pkt.src_ip, arp_pkt.dst_ip):
             # self.logger.info("Conección permitida")
-            self.arp_forwarding(msg, arp_pkt.src_ip, arp_pkt.dst_ip)
+            self.arp_reply(msg, arp_pkt.src_ip, arp_pkt.dst_ip)
 
         if ip_pkt and is_connection_allowed(ip_pkt.src, ip_pkt.dst):
             self.shortest_forwarding(msg, eth_pkt.ethertype, ip_pkt.src, ip_pkt.dst)
 
-    def arp_forwarding(self, msg, src_ip, dst_ip):
-        datapath = msg.datapath
-        ofproto = datapath.ofproto
+    def arp_reply(self, msg, src_ip, dst_ip):
+        dp = msg.datapath
+        ofp, parser = dp.ofproto, dp.ofproto_parser
+        in_port = msg.match['in_port']
 
-        result = self.arp_handler.get_host_location(dst_ip)
-        if result:
-            datapath_dst, out_port = result
-            datapath = self.datapaths[datapath_dst]
-            out = self._build_packet_out(datapath, ofproto.OFP_NO_BUFFER,
-                                         ofproto.OFPP_CONTROLLER, out_port, msg.data)
-            datapath.send_msg(out)
-        else:
-            self.controlled_arp_forwarding(msg, src_ip, dst_ip)
+        if dst_ip not in self.arp_handler.hosts:
+            return
+
+        _, _, _, dst_mac = self.arp_handler.hosts[dst_ip]
+
+        # Construir ARP_REPLY
+        pkt = packet.Packet(msg.data)
+        eth_pkt = pkt.get_protocol(ethernet.ethernet)
+        arp_reply = packet.Packet()
+        arp_reply.add_protocol(ethernet.ethernet(
+            ethertype=ether_types.ETH_TYPE_ARP,
+            dst=eth_pkt.src,
+            src=dst_mac))
+        arp_reply.add_protocol(arp.arp(
+            opcode=arp.ARP_REPLY,
+            src_mac=dst_mac,
+            src_ip=dst_ip,
+            dst_mac=eth_pkt.src,
+            dst_ip=src_ip))
+        arp_reply.serialize()
+
+        # Enviar el reply de vuelta al puerto de origen
+        out = parser.OFPPacketOut(
+            datapath=dp,
+            buffer_id=ofp.OFP_NO_BUFFER,
+            in_port=ofp.OFPP_CONTROLLER,
+            actions=[parser.OFPActionOutput(in_port)],
+            data=arp_reply.data)
+        dp.send_msg(out)
 
     def _build_packet_out(self, datapath, buffer_id, src_port, dst_port, data):
         actions = [datapath.ofproto_parser.OFPActionOutput(dst_port)] if dst_port else []
@@ -93,33 +126,6 @@ class ShortestPath(app_manager.RyuApp):
         return datapath.ofproto_parser.OFPPacketOut(
             datapath=datapath, buffer_id=buffer_id,
             data=msg_data, in_port=src_port, actions=actions)
-
-    def controlled_arp_forwarding(self, msg, src_ip, dst_ip):
-        """
-        - Solo reenvía paquetes ARP si no se conoce el destino.
-        - Solo reenvía a puertos de acceso no asociados aún a un host.
-        """
-        datapath = msg.datapath
-        ofproto = datapath.ofproto
-
-        if self.arp_handler.get_host_location(dst_ip):
-            # Ya conocemos la ubicación del destino, no hace falta hacer broadcast
-            return
-
-        # self.logger.info(f"[ARP] Broadcast controlado para {dst_ip}, origen: {src_ip}")
-
-        for dpid in self.arp_handler.access_ports:
-            for port in self.arp_handler.access_ports[dpid]:
-                # Si no está en la tabla de acceso, significa que aún no hay host conocido en ese puerto
-                if (dpid, port) not in self.arp_handler.access_table:
-                    if dpid not in self.datapaths:
-                        continue  # Puede que el datapath aún no esté registrado
-                    datapath = self.datapaths[dpid]
-                    out = self._build_packet_out(
-                        datapath, ofproto.OFP_NO_BUFFER,
-                        ofproto.OFPP_CONTROLLER, port, msg.data)
-                    datapath.send_msg(out)
-
 
     def shortest_forwarding(self, msg, eth_type, ip_src, ip_dst):
         datapath = msg.datapath
