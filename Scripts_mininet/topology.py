@@ -4,6 +4,48 @@ from mininet.node import OVSSwitch, RemoteController
 from mininet.link import TCLink
 from mininet.cli import CLI
 from mininet.log import setLogLevel
+import subprocess
+import requests
+
+API_URL = f'http://192.168.56.101:8080/hosts'
+
+def register_host(net, host):
+    ip  = host.IP()
+    mac = host.MAC()
+    # Obtenemos el switch leaf y el puerto físico de acceso
+    # links: [(intf_host, intf_sw), …]
+    links = [l for l in net.links if host in (l.intf1.node, l.intf2.node)]
+
+    intf_h, intf_sw = links[0].intf1, links[0].intf2
+    if intf_sw.node == host:
+        intf_h, intf_sw = links[0].intf2, links[0].intf1
+
+    leaf = intf_sw.node
+    # En Mininet, leaf.ports mapea Intf -> número de puerto
+    port = leaf.ports[intf_sw]
+    # El dpid lo convertimos a entero de la representación hex
+    dpid = int(leaf.dpid, 16)
+
+    payload = {'dpid': dpid, 'in_port': port, 'ip': ip, 'mac': mac}
+    try:
+        r = requests.post(API_URL, json=payload, timeout=2)
+        if r.status_code != 200:
+            print(f"[REST] fallo al registrar {host.name}: {r.status_code} {r.text}")
+    except Exception as e:
+        print(f"[REST] error al conectar con {API_URL}: {e}")
+
+def cleanup_netns():
+    """
+    Elimina todos los network namespaces existentes para evitar conflictos al reiniciar Mininet.
+    """
+    try:
+        out = subprocess.check_output(['ip', 'netns', 'list']).decode().splitlines()
+    except subprocess.CalledProcessError:
+        return
+    for line in out:
+        ns = line.split()[0]
+        # Eliminar namespace
+        subprocess.run(['ip', 'netns', 'del', ns], check=False)
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description="Simulación de una arquitectura Spine-Leaf en Mininet.")
@@ -21,7 +63,41 @@ def parse_arguments():
 
     return parser.parse_args()
 
+def register_vm(net, host, vm_ns, veth_v, ip_addr):
+    """
+    Registra una VM (namespace) igual que register_host,
+    obteniendo su MAC e indicando el switch Leaf y puerto físicos.
+    """
+    # 1) Leer MAC desde el namespace
+    mac = host.cmd(f'ip netns exec {vm_ns} cat /sys/class/net/{veth_v}/address').strip()
+
+    # 2) Determinar el switch Leaf y el puerto físico de acceso
+    #    Igual que en register_host, encontramos el enlace host<->switch
+    links = [l for l in net.links if host in (l.intf1.node, l.intf2.node)]
+    intf_h, intf_sw = links[0].intf1, links[0].intf2
+    if intf_sw.node == host:
+        intf_h, intf_sw = links[0].intf2, links[0].intf1
+
+    leaf = intf_sw.node
+    port = leaf.ports[intf_sw]
+    dpid = int(leaf.dpid, 16)
+
+    # 3) Payload y POST
+    payload = {
+        'dpid':   dpid,
+        'in_port': port,
+        'ip':     ip_addr,
+        'mac':    mac
+    }
+    try:
+        r = requests.post(API_URL, json=payload, timeout=2)
+        if r.status_code != 200:
+            print(f"[REST-VM] fallo al registrar {vm_ns}: {r.status_code} {r.text}")
+    except Exception as e:
+        print(f"[REST-VM] error al conectar con {API_URL}: {e}")
+
 def create_spine_leaf_topology(spine_switches, leaf_switches, hosts_per_leaf, link_bandwidth, redundancy, controller_ip):
+    cleanup_netns()
     net = Mininet(controller=None, switch=OVSSwitch, link=TCLink)
     
     # Agregar el controlador remoto
@@ -58,6 +134,11 @@ def create_spine_leaf_topology(spine_switches, leaf_switches, hosts_per_leaf, li
     # Iniciar la red
     net.start()
 
+    # ——— Registrar todos los hosts en el controlador vía REST ———
+    for host in net.hosts:
+        register_host(net, host)
+
+
     # --- CONFIGURACIÓN DE UN ÚNICO BRIDGE (br0), NETNS Y VETH POR HOST -----
     hosts_vlan = {
         'h1' : {10: ['10.0.10.1/24', '10.0.10.2/24']},
@@ -67,50 +148,58 @@ def create_spine_leaf_topology(spine_switches, leaf_switches, hosts_per_leaf, li
     }
 
     for hname, vlan_map in hosts_vlan.items():
-        host    = net.get(hname)
-        parent  = host.intfNames()[0]   # e.g. 'h20-eth0'
+        host = net.get(hname)
+        parent = host.defaultIntf().name    # interfaz física en Mininet
+        host_ip = host.IP()
+        prefix = host.defaultIntf().prefixLen
 
-        # 1) Crear y levantar un único bridge br0 en este host
+        # 1) Crear bridge local br0
         host.cmd('ip link add br0 type bridge')
         host.cmd('ip link set br0 up')
-        # 2) Conectar la interfaz física al bridge
+
+        # 2) Mover la interfaz física al bridge y reasignar IP
+        host.cmd(f'ip addr flush dev {parent}')
         host.cmd(f'ip link set {parent} master br0')
         host.cmd(f'ip link set {parent} up')
+        host.cmd(f'ip addr add {host_ip}/{prefix} dev br0')
 
-        veth_count = 0   # contador global de VMs en este host
-        vm_count = 0
-        # 3) Por cada VLAN/IP, instanciar una VM ligera (netns + veth)
+        # 3) Crear namespaces y veths para cada VM, conectados a br0
+        veth_count = 0
         for vlan, ip_list in vlan_map.items():
-            vm_count = 0
             for ip_addr in ip_list:
                 veth_count += 1
-                vm_count += 1
-                # namespace y veth nombrados secuencialmente
-                short     = vlan // 10            # 10→1, 20→2, 30→3…
-                vm_ns     = f'C{short}_vm{veth_count}'
-                veth_h    = f'veth{veth_count}_host'
-                veth_vm   = f'veth{veth_count}_vm'
+                vm_ns = f"{hname}-C{vlan}-vm{veth_count}"
+                veth_h = f"{hname}-vm{veth_count}-h"
+                veth_v = f"{hname}-vm{veth_count}-v"
 
-                # crear namespace
-                host.cmd(f'ip netns add {hname}-{vm_ns}')
+                # Crear namespace y par veth
+                host.cmd(f'ip netns add {vm_ns}')
+                host.cmd(f'ip link add {veth_h} type veth peer name {veth_v}')
 
-                # crear par veth y atar el extremo host a br0
-                host.cmd(f'ip link add {hname}-{veth_h} type veth peer name {hname}-{veth_vm}')
-                host.cmd(f'ip link set {hname}-{veth_h} master br0')
-                host.cmd(f'ip link set {hname}-{veth_h} up')
+                # Conectar extremo host al bridge
+                host.cmd(f'ip link set {veth_h} master br0')
+                host.cmd(f'ip link set {veth_h} up')
 
-                # mover extremo VM al namespace y configurarlo
-                host.cmd(f'ip link set {hname}-{veth_vm} netns {hname}-{vm_ns}')
-                host.cmd(f'ip netns exec {hname}-{vm_ns} ip link set {hname}-{veth_vm} up')
-                host.cmd(f'ip netns exec {hname}-{vm_ns} ip addr add {ip_addr} dev {hname}-{veth_vm}')
-                host.cmd(f'ip netns exec {hname}-{vm_ns} ip link set lo up')
+                # Configurar extremo VM dentro del namespace
+                host.cmd(f'ip link set {veth_v} netns {vm_ns}')
+                host.cmd(f'ip netns exec {vm_ns} ip link set {veth_v} up')
+                host.cmd(f'ip netns exec {vm_ns} ip addr add {ip_addr} dev {veth_v}')
+                host.cmd(f'ip netns exec {vm_ns} ip link set lo up')
 
+                register_vm(net, host, vm_ns, veth_v, ip_addr.split('/')[0])
 
-    # Mostrar CLI de Mininet
-    CLI(net)
+    # # Mostrar CLI de Mininet
+    # CLI(net)
 
-    # Detener la red al salir
-    net.stop()
+    # # Detener la red al salir
+    # net.stop()
+
+    # Al salir, limpiar namespaces
+    try:
+        CLI(net)
+    finally:
+        net.stop()
+        cleanup_netns()
 
 if __name__ == "__main__":
     setLogLevel("info")
