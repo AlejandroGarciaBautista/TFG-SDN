@@ -186,6 +186,8 @@ def create_spine_leaf_topology(spine_switches, leaf_switches, hosts_per_leaf, li
                 host.cmd(f'ip netns exec {vm_ns} ip addr add {ip_addr} dev {veth_v}')
                 host.cmd(f'ip netns exec {vm_ns} ip link set lo up')
 
+                host.cmd(f'ip netns exec {vm_ns} ip route add default via 10.0.{vlan}.254 dev {veth_v}')
+
                 register_vm(net, host, vm_ns, veth_v, ip_addr.split('/')[0])
 
     # # Mostrar CLI de Mininet
