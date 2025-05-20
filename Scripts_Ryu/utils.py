@@ -2,18 +2,15 @@ import os
 import json
 import ipaddress
 
-# --- Paths a los ficheros (se mantienen globales) ---
+# --- Paths a los ficheros ---
 BASE_DIR     = os.path.dirname(__file__)
 VLAN_FILE    = os.path.join(BASE_DIR, 'vlans.json')
 ALLOWED_FILE = os.path.join(BASE_DIR, 'allowed_communications.json')
 
-
-def _load_configs():
+def load_configs():
     """
-    Carga y parsea ambos ficheros JSON en cada invocación.
-    Devuelve:
-      - dict VLAN_NETWORKS: { vlan_id: IPv4Network, ... }
-      - set ALLOWED_COMMS: set de tuplas (vlan_src, vlan_dst)
+    Carga y parsea ambos ficheros JSON en cada invocación para asi poder realizar
+    modificaciones en estos ficheros sin necesidad de reiniciar el controlador 
     """
     # 1) Leer rangos de VLAN
     with open(VLAN_FILE) as f:
@@ -34,10 +31,10 @@ def _load_configs():
 def get_vlan_from_ip(ip, vlan_networks=None):
     """
     Dada una IP, devuelve el ID de VLAN al que pertenece, o None.
-    Si no se pasa vlan_networks, lo carga de los JSON en caliente.
+    Si no se pasa vlan_networks, lo carga de los JSON al momento.
     """
     if vlan_networks is None:
-        vlan_networks, _ = _load_configs()
+        vlan_networks, _ = load_configs()
 
     addr = ipaddress.ip_address(ip)
     for vlan_id, network in vlan_networks.items():
@@ -48,9 +45,10 @@ def get_vlan_from_ip(ip, vlan_networks=None):
 
 def is_connection_allowed(ip_src, ip_dst):
     """
-    Cada llamada recarga los JSON y comprueba si el par de VLANs está permitido.
+    Dada un par de direcciones IP, comprueba si esa conexión esta permitida.
+    Carga los JSONs necesarios en el momento de la ejecución.
     """
-    vlan_networks, allowed_comms = _load_configs()
+    vlan_networks, allowed_comms = load_configs()
 
     vlan_src = get_vlan_from_ip(ip_src, vlan_networks)
     vlan_dst = get_vlan_from_ip(ip_dst, vlan_networks)

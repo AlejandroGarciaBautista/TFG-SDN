@@ -103,6 +103,7 @@ class TopologyManager(app_manager.RyuApp):
         if ip_pkt and ip_pkt.dst == '224.0.0.22': # Ingnorar IGMPv3 membership reports
             return
 
+
     def register_access_info(self, dpid, in_port, ip, mac):
         vlan = get_vlan_from_ip(ip)
         
@@ -110,6 +111,7 @@ class TopologyManager(app_manager.RyuApp):
             return
 
         self.hosts[ip] = (dpid, in_port, vlan, mac)
+
 
     def get_host_location(self, host_ip):
         vlan = get_vlan_from_ip(host_ip)
@@ -125,8 +127,10 @@ class TopologyManager(app_manager.RyuApp):
         dpid, port, _, _ = info
         return (dpid, port)
 
+
     def get_datapath(self, dpid):
         return self.dps.get(dpid) or topo_api.get_switch(self, dpid)[0].dp
+
 
     def set_shortest_path(self, ip_src, ip_dst, src_dpid, dst_dpid, to_port_no, to_dst_match, pre_actions=[]):
         if not nx.has_path(self.graph, src_dpid, dst_dpid):
@@ -170,6 +174,7 @@ class TopologyManager(app_manager.RyuApp):
             # self.logger.info(f"Usando enlace {u} -> {v} por puerto {selected_edge['src_port']} (opción {rr_index % len(edges_data) + 1} de {len(edges_data)})")
             return selected_edge['src_port']
 
+
     def install_path(self, match, path, pre_actions=[]):
         for i in range(len(path) - 1):
             u, v = path[i], path[i + 1]
@@ -184,6 +189,7 @@ class TopologyManager(app_manager.RyuApp):
             actions = [dp.ofproto_parser.OFPActionOutput(port_no)]
             self.add_flow(dp, 10, match, pre_actions + actions)
 
+
     def add_flow(self, dp, p, match, actions, idle_timeout=15, hard_timeout=150):
         parser = dp.ofproto_parser
         ofproto = dp.ofproto
@@ -193,6 +199,7 @@ class TopologyManager(app_manager.RyuApp):
                                 hard_timeout=hard_timeout,
                                 match=match, instructions=inst)
         dp.send_msg(mod)
+
 
     def print_graph_links(self):
         self.logger.info("==== ENLACES ACTUALES EN EL GRAFO ====")

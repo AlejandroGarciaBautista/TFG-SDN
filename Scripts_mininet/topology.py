@@ -21,7 +21,7 @@ def register_host(net, host):
         intf_h, intf_sw = links[0].intf2, links[0].intf1
 
     leaf = intf_sw.node
-    # En Mininet, leaf.ports mapea Intf -> número de puerto
+    # leaf.ports mapea Intf -> número de puerto
     port = leaf.ports[intf_sw]
     # El dpid lo convertimos a entero de la representación hex
     dpid = int(leaf.dpid, 16)
@@ -33,35 +33,6 @@ def register_host(net, host):
             print(f"[REST] fallo al registrar {host.name}: {r.status_code} {r.text}")
     except Exception as e:
         print(f"[REST] error al conectar con {API_URL}: {e}")
-
-def cleanup_netns():
-    """
-    Elimina todos los network namespaces existentes para evitar conflictos al reiniciar Mininet.
-    """
-    try:
-        out = subprocess.check_output(['ip', 'netns', 'list']).decode().splitlines()
-    except subprocess.CalledProcessError:
-        return
-    for line in out:
-        ns = line.split()[0]
-        # Eliminar namespace
-        subprocess.run(['ip', 'netns', 'del', ns], check=False)
-
-def parse_arguments():
-    parser = argparse.ArgumentParser(description="Simulación de una arquitectura Spine-Leaf en Mininet.")
-
-    parser.add_argument("--spine", type=int, default=2, help="Cantidad de switches spine (por defecto: 2)")
-    parser.add_argument("--leaf", type=int, default=4, help="Cantidad de switches leaf (por defecto: 4)")
-    parser.add_argument("--hosts", type=int, default=12, help="Cantidad de hosts por switch leaf (por defecto: 12)")
-    parser.add_argument("--bw", type=int, default=1000, help="Capacidad de los enlaces Uplink en Mbps (por defecto: 1000 (máximo permitido))")
-    parser.add_argument("-c", type=str, default="192.168.56.101", help="Dirección IP del controlador SDN (por defecto: 192.168.56.101)")
-
-    parser.add_argument("--rd", dest='rd', action='store_true', help="Aplicar Redundancia en la red")
-    parser.add_argument("--no-rd", dest='rd', action='store_false', help="No aplicar Redundancia en la red")
-
-    parser.set_defaults(rd=True)
-
-    return parser.parse_args()
 
 def register_vm(net, host, vm_ns, veth_v, ip_addr):
     """
@@ -95,6 +66,35 @@ def register_vm(net, host, vm_ns, veth_v, ip_addr):
             print(f"[REST-VM] fallo al registrar {vm_ns}: {r.status_code} {r.text}")
     except Exception as e:
         print(f"[REST-VM] error al conectar con {API_URL}: {e}")
+
+def cleanup_netns():
+    """
+    Elimina todos los network namespaces existentes para evitar conflictos al reiniciar Mininet.
+    """
+    try:
+        out = subprocess.check_output(['ip', 'netns', 'list']).decode().splitlines()
+    except subprocess.CalledProcessError:
+        return
+    for line in out:
+        ns = line.split()[0]
+        # Eliminar namespace
+        subprocess.run(['ip', 'netns', 'del', ns], check=False)
+
+def parse_arguments():
+    parser = argparse.ArgumentParser(description="Simulación de una arquitectura Spine-Leaf en Mininet.")
+
+    parser.add_argument("--spine", type=int, default=2, help="Cantidad de switches spine (por defecto: 2)")
+    parser.add_argument("--leaf", type=int, default=4, help="Cantidad de switches leaf (por defecto: 4)")
+    parser.add_argument("--hosts", type=int, default=12, help="Cantidad de hosts por switch leaf (por defecto: 12)")
+    parser.add_argument("--bw", type=int, default=1000, help="Capacidad de los enlaces Uplink en Mbps (por defecto: 1000 (máximo permitido))")
+    parser.add_argument("-c", type=str, default="192.168.56.101", help="Dirección IP del controlador SDN (por defecto: 192.168.56.101)")
+
+    parser.add_argument("--rd", dest='rd', action='store_true', help="Aplicar Redundancia en la red")
+    parser.add_argument("--no-rd", dest='rd', action='store_false', help="No aplicar Redundancia en la red")
+
+    parser.set_defaults(rd=True)
+
+    return parser.parse_args()
 
 def create_spine_leaf_topology(spine_switches, leaf_switches, hosts_per_leaf, link_bandwidth, redundancy, controller_ip):
     cleanup_netns()
