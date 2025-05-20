@@ -7,21 +7,20 @@ from ryu.topology import api as topo_api
 from ryu.topology import event as topo_event
 import networkx as nx
 from utils import get_vlan_from_ip
-import logging
 
 from ryu.app.wsgi import ControllerBase, WSGIApplication, route
 from webob import Response
 
 
-class ArpHandler(app_manager.RyuApp):
+class TopologyManager(app_manager.RyuApp):
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
     # Contexto para levantar el servidor REST
     _CONTEXTS = { 'wsgi': WSGIApplication }
 
     def __init__(self, *args, **kwargs):        
-        super(ArpHandler, self).__init__(*args, **kwargs)
+        super(TopologyManager, self).__init__(*args, **kwargs)
         wsgi = kwargs['wsgi']
-        wsgi.register(ArpRESTController, { 'arp_handler': self })
+        wsgi.register(RESTController, { 'TopologyManager': self })
 
         self.topology_api_app = self
         self.link_to_port = {}
@@ -33,7 +32,7 @@ class ArpHandler(app_manager.RyuApp):
         self.graph = nx.MultiDiGraph()
         self.dps = {}
         self.switches = set()
-        self.logger.setLevel(logging.INFO)
+        # self.logger.setLevel(logging.INFO)
         self.ecmp_rr_counters = {}  # (src_dpid, dst_dpid) -> index
         self.edge_rr_counters = {}  # (u, v) -> index
 
@@ -43,9 +42,6 @@ class ArpHandler(app_manager.RyuApp):
     @set_ev_cls(topo_event.EventLinkDelete, MAIN_DISPATCHER)
     def _topology_change_handler(self, ev):
         self.update_topology(ev)
-        # self.print_graph_links()
-        # Mostrar el grafo con Data = True
-        # self.logger.info("Graph: %s", self.graph.edges(data=True))
 
     def update_topology(self, ev):
         if isinstance(ev, topo_event.EventSwitchEnter):
@@ -71,7 +67,6 @@ class ArpHandler(app_manager.RyuApp):
             dst = ev.link.dst
             self.link_to_port[(src.dpid, dst.dpid)] = (src.port_no, dst.port_no)
             self.graph.add_edge(src.dpid, dst.dpid, src_port=src.port_no, dst_port=dst.port_no)
-            # self.logger.info(f"Link added: {src.dpid} -> {dst.dpid} ({src.port_no}, {dst.port_no})")
             self.interior_ports[src.dpid].add(src.port_no)
             self.interior_ports[dst.dpid].add(dst.port_no)
 
@@ -85,8 +80,7 @@ class ArpHandler(app_manager.RyuApp):
                 for key, data in list(edge_data.items()):
                     if data.get('src_port') == src.port_no and data.get('dst_port') == dst.port_no:
                         self.graph.remove_edge(src.dpid, dst.dpid, key)
-                        # self.logger.info(f"Link deleted: {src.dpid} -> {dst.dpid} ({src.port_no}, {dst.port_no})")
-                        break  # ya lo eliminamos, salimos del bucle
+                        break
 
             self.interior_ports[src.dpid].discard(src.port_no)
             self.interior_ports[dst.dpid].discard(dst.port_no)
@@ -98,26 +92,16 @@ class ArpHandler(app_manager.RyuApp):
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
     def _packet_in_handler(self, ev):
         msg = ev.msg
-        datapath = msg.datapath
-        in_port = msg.match['in_port']
         pkt = packet.Packet(msg.data)
         eth_pkt = pkt.get_protocol(ethernet.ethernet)
         eth_type = eth_pkt.ethertype if eth_pkt else None
-        arp_pkt = pkt.get_protocol(arp.arp)
         ip_pkt = pkt.get_protocol(ipv4.ipv4)
 
-        if eth_type == ether_types.ETH_TYPE_LLDP:
+        if eth_type == ether_types.ETH_TYPE_LLDP: # Ignorar LLDP
             return
 
-        if ip_pkt and ip_pkt.dst == '224.0.0.22':
-            # ignorar IGMPv3 membership reports
+        if ip_pkt and ip_pkt.dst == '224.0.0.22': # Ingnorar IGMPv3 membership reports
             return
-
-        # if ip_pkt:
-        #     self.register_access_info(datapath.id, in_port, ip_pkt.src, eth_pkt.src)
-            
-        # if arp_pkt:
-        #     self.register_access_info(datapath.id, in_port, arp_pkt.src_ip, arp_pkt.src_mac)
 
     def register_access_info(self, dpid, in_port, ip, mac):
         vlan = get_vlan_from_ip(ip)
@@ -126,17 +110,6 @@ class ArpHandler(app_manager.RyuApp):
             return
 
         self.hosts[ip] = (dpid, in_port, vlan, mac)
-        # self.logger.info(f"Hosts actualizados: {self.hosts}")
-        
-        # key = (dpid, in_port, vlan)
-        
-        # if in_port in self.access_ports.get(dpid, set()):
-        #     current = self.access_table.get((dpid, in_port))
-        #     if current != (ip, mac):
-        #         self.access_table[(dpid, in_port)] = (ip, mac)
-        #         self.logger.info(f"Se ha registrado el siguiente host DPID: {dpid}/{in_port}, MAC: {mac}, IP: {ip}")
-            
-        # self.logger.info(f"Tabla de acceso actualizada: {self.access_table}")
 
     def get_host_location(self, host_ip):
         vlan = get_vlan_from_ip(host_ip)
@@ -151,11 +124,6 @@ class ArpHandler(app_manager.RyuApp):
         
         dpid, port, _, _ = info
         return (dpid, port)
-
-        # for (dpid, port), (ip, _) in self.access_table.items():
-        #     if ip == host_ip:
-        #         return (dpid, port)
-        # return None
 
     def get_datapath(self, dpid):
         return self.dps.get(dpid) or topo_api.get_switch(self, dpid)[0].dp
@@ -202,7 +170,6 @@ class ArpHandler(app_manager.RyuApp):
             # self.logger.info(f"Usando enlace {u} -> {v} por puerto {selected_edge['src_port']} (opción {rr_index % len(edges_data) + 1} de {len(edges_data)})")
             return selected_edge['src_port']
 
-
     def install_path(self, match, path, pre_actions=[]):
         for i in range(len(path) - 1):
             u, v = path[i], path[i + 1]
@@ -217,7 +184,7 @@ class ArpHandler(app_manager.RyuApp):
             actions = [dp.ofproto_parser.OFPActionOutput(port_no)]
             self.add_flow(dp, 10, match, pre_actions + actions)
 
-    def add_flow(self, dp, p, match, actions, idle_timeout=10, hard_timeout=5):
+    def add_flow(self, dp, p, match, actions, idle_timeout=15, hard_timeout=150):
         parser = dp.ofproto_parser
         ofproto = dp.ofproto
         inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
@@ -234,10 +201,12 @@ class ArpHandler(app_manager.RyuApp):
         self.logger.info("========================================")
 
 
-class ArpRESTController(ControllerBase):
+
+
+class RESTController(ControllerBase):
     def __init__(self, req, link, data, **config):
-        super(ArpRESTController, self).__init__(req, link, data, **config)
-        self.arp_handler = data['arp_handler']
+        super(RESTController, self).__init__(req, link, data, **config)
+        self.TopologyManager = data['TopologyManager']
 
     @route('arp', '/hosts', methods=['POST'])
     def add_host(self, req, **kwargs):
@@ -254,5 +223,6 @@ class ArpRESTController(ControllerBase):
         if None in (dpid, port, ip_addr, mac):
             return Response(status=400, body='Missing fields')
         # Llamamos al método que ya tienes implementado
-        self.arp_handler.register_access_info(dpid, port, ip_addr, mac)
+        self.TopologyManager.register_access_info(dpid, port, ip_addr, mac)
         return Response(status=200)
+    

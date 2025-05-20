@@ -15,6 +15,7 @@ from ryu.topology import api as topo_api  # API de topología de Ryu
 from ryu.topology import event as topo_event  # Eventos de topología (switch enter/leave, link add/delete)
 import networkx as nx  # Estructuras de grafo para rutas
 import logging  # Para registro de logs
+import ipaddress
 
 class ArpHandler(app_manager.RyuApp):
     '''
@@ -49,6 +50,12 @@ class ArpHandler(app_manager.RyuApp):
         self.ecmp_rr_counters = {}
         # Contadores round-robin por enlace: (u, v) -> índice de enlace
         self.edge_rr_counters = {}
+        # Definir subredes overlay para filtrar ARP no etiquetado
+        self.overlay_subnets = [
+            ipaddress.ip_network('10.0.10.0/24'),
+            ipaddress.ip_network('10.0.20.0/24'),
+            ipaddress.ip_network('10.0.30.0/24'),
+        ]
 
     @set_ev_cls(topo_event.EventSwitchEnter, MAIN_DISPATCHER)
     @set_ev_cls(topo_event.EventSwitchLeave, MAIN_DISPATCHER)
@@ -136,7 +143,13 @@ class ArpHandler(app_manager.RyuApp):
         '''
         msg = ev.msg
         datapath = msg.datapath
+        ofp = datapath.ofproto
         in_port = msg.match['in_port']
+        
+        # raw_vid = msg.match.get('vlan_vid', 0)
+        # vid = raw_vid 
+        # # & (~ofp.OFPVID_PRESENT)  # Extraer ID de VLAN (12 bits)
+
         # Parsear el paquete completo
         pkt = packet.Packet(msg.data)
         eth_pkt = pkt.get_protocol(ethernet.ethernet)
@@ -147,14 +160,20 @@ class ArpHandler(app_manager.RyuApp):
         vlan_hdr = pkt.get_protocol(vlan.vlan)
         vid = vlan_hdr.vid if vlan_hdr else 0
 
+        if ip_pkt:
+            self.logger.info(f"Paquete IP recibido, VLAN: {vid}")
+        if arp_pkt:
+            self.logger.info(f"Paquete ARP recibido, VLAN: {vid}")
+
         # Ignorar LLDP (usado para descubrimiento de topología)
         if eth_type == ether_types.ETH_TYPE_LLDP:
             return
 
         # Si es paquete IP, registrar tupla (ip, mac) en tabla de acceso
-        if ip_pkt:
-            self.register_access_info(
-                datapath.id, in_port, vid, ip_pkt.src, eth_pkt.src)
+        # if ip_pkt:
+        #     self.logger.info(f"Paquete IP, se registra: {ip_pkt.src}/{vid}")
+        #     self.register_access_info(
+        #         datapath.id, in_port, vid, ip_pkt.src, eth_pkt.src)
         # Si es paquete ARP, registrar información ARP
         if arp_pkt:
             self.register_access_info(
@@ -169,6 +188,7 @@ class ArpHandler(app_manager.RyuApp):
         # Verificar que el puerto sea de acceso (no interior)
         if port_no not in self.access_ports.get(dpid, ()): 
             return
+        
         key = (dpid, port_no, vlan_id)
         hostset = self.access_table.setdefault(key, set())
         # Si es un nuevo host, añadirlo
@@ -199,6 +219,106 @@ class ArpHandler(app_manager.RyuApp):
         return (self.dps.get(dpid) 
                 or topo_api.get_switch(self, dpid)[0].dp)
 
+# --------------------------------------------------------
+
+
+# Implementar set_shortest_path para VLANs cruzadas
+    def cross_set_shortest_path(self,
+                                ip_src, ip_dst,
+                                src_dpid, dst_dpid,
+                                to_port_no,
+                                orig_vlan,
+                                dest_vlan):
+        """
+        ECMP proactivo para túnel VLAN con IP y ARP:
+
+        1) El tráfico circula por la red siempre con VLAN `orig_vlan`.
+        2) Instalamos FLOWS tanto para IP como para *todas* las ARP
+        en VLAN orig_vlan (sin filtrar arp_tpa).
+        3) Sólo en el último salto hacemos:
+            POP(orig_vlan) → PUSH(dest_vlan) → OUTPUT(to_port_no)
+        4) Devolvemos el puerto de salida en el primer switch
+        (para send_packet_out).
+        """
+
+        # — 1) Selección round-robin entre todos los caminos más cortos
+        paths = list(nx.all_shortest_paths(self.graph, src_dpid, dst_dpid))
+        if not paths:
+            self.logger.warning(f"No hay camino {src_dpid}→{dst_dpid}")
+            return None
+
+        key = (src_dpid, dst_dpid)
+        idx = self.ecmp_rr_counters.get(key, 0)
+        path = paths[idx % len(paths)]
+        self.ecmp_rr_counters[key] = idx + 1
+        self.logger.info(f"ECMP {src_dpid}→{dst_dpid}, opción {(idx%len(paths))+1}/{len(paths)}: {path}")
+
+        # — 2) Construir MATCH para IP y para *toda* ARP en VLAN orig_vlan
+        dp0    = self.get_datapath(src_dpid)
+        parser = dp0.ofproto_parser
+        ofp    = dp0.ofproto
+
+        match_ip = parser.OFPMatch(
+            eth_type=ether_types.ETH_TYPE_IP,
+            vlan_vid=(ofp.OFPVID_PRESENT | orig_vlan),
+            ipv4_src=ip_src,
+            ipv4_dst=ip_dst
+        )
+        match_arp = parser.OFPMatch(
+            eth_type=ether_types.ETH_TYPE_ARP,
+            vlan_vid=(ofp.OFPVID_PRESENT | orig_vlan)
+        )
+
+        # — 3) Instalar FLOWS en cada salto excepto el último
+        first_out = None
+        for i in range(len(path) - 1):
+            u, v = path[i], path[i+1]
+
+            # Round-robin si hay múltiples enlaces
+            edges = list(self.graph.get_edge_data(u, v).items())
+            key_e = (u, v, len(edges))
+            eidx  = self.edge_rr_counters.get(key_e, 0)
+            sel   = edges[eidx % len(edges)][1]
+            if len(edges) > 1:
+                self.edge_rr_counters[key_e] = eidx + 1
+
+            out_port = sel['src_port']
+            dp_u     = self.get_datapath(u)
+            parser_u = dp_u.ofproto_parser
+
+            if i == 0:
+                # Guardamos el primer puerto para el PacketOut
+                first_out = out_port
+
+            # Origen e intermedios: sólo reenvío
+            actions = [ parser_u.OFPActionOutput(out_port) ]
+
+            # Instalamos para IP y para ARP genérico
+            self.add_flow(dp_u, 10, match_ip,  actions)
+            self.add_flow(dp_u, 10, match_arp, actions)
+
+        # — 4) Último salto: swap de VLAN y envío al host
+        dp_dst     = self.get_datapath(dst_dpid)
+        parser_dst = dp_dst.ofproto_parser
+
+        actions_dst = [
+            parser_dst.OFPActionPopVlan(),  # quitar orig_vlan
+            parser_dst.OFPActionPushVlan(ether_types.ETH_TYPE_8021Q),
+            parser_dst.OFPActionSetField(
+                vlan_vid=(dp_dst.ofproto.OFPVID_PRESENT | dest_vlan)
+            ),
+            parser_dst.OFPActionOutput(to_port_no)
+        ]
+        # IP y ARP en el último switch
+        self.add_flow(dp_dst, 10, match_ip,  actions_dst)
+        self.add_flow(dp_dst, 10, match_arp, actions_dst)
+
+        return first_out
+
+
+# --------------------------------------------------------
+
+
     def set_shortest_path(self, ip_src, ip_dst, src_dpid, dst_dpid,
                           to_port_no, vlan_id=0, pre_actions=[]):
         '''
@@ -214,6 +334,7 @@ class ArpHandler(app_manager.RyuApp):
 
         # 2) Selección de uno de los caminos más cortos (ECMP round-robin)
         all_paths = list(nx.all_shortest_paths(self.graph, src_dpid, dst_dpid))
+        self.logger.info(f"Número de caminos {src_dpid}→{dst_dpid}: {len(all_paths)}")
         key_ecmp = (src_dpid, dst_dpid)
         idx = self.ecmp_rr_counters.get(key_ecmp, 0)
         path = all_paths[idx % len(all_paths)]
@@ -225,6 +346,7 @@ class ArpHandler(app_manager.RyuApp):
         ofp = dp0.ofproto
 
         if vlan_id:
+            self.logger.info(f"Hay VLAN {vlan_id}")
             match = parser.OFPMatch(
                 eth_type=ether_types.ETH_TYPE_IP,
                 vlan_vid=(ofp.OFPVID_PRESENT | vlan_id),
@@ -232,6 +354,7 @@ class ArpHandler(app_manager.RyuApp):
                 ipv4_dst=ip_dst
             )
         else:
+            self.logger.info(f"NO Hay VLAN {vlan_id}")
             match = parser.OFPMatch(
                 eth_type=ether_types.ETH_TYPE_IP,
                 ipv4_src=ip_src,
@@ -294,7 +417,7 @@ class ArpHandler(app_manager.RyuApp):
             self.add_flow(dp, 10, match, pre_actions + actions)
 
     def add_flow(self, dp, priority, match, actions,
-                 idle_timeout=10, hard_timeout=5):
+                 idle_timeout=0, hard_timeout=0):
         '''
         Crea y envía un mensaje FlowMod para añadir un flujo al switch.
         '''
