@@ -7,7 +7,68 @@ from mininet.log import setLogLevel
 import subprocess
 import requests
 
+import time
+import threading
+
 API_URL = f'http://192.168.56.101:8080/hosts'
+
+def launch_iperf_tests():
+    def iperf(ns, target_ip, duration=10, logfile=None):
+        cmd = f"ip netns exec {ns} iperf3 -c {target_ip} -t {duration}"
+        if logfile:
+            cmd += f" --logfile {logfile}"
+        subprocess.run(cmd, shell=True)
+
+    # 1. Lanzar servidores en destino
+    destinations = {
+        "h1-C10-vm2": "10.0.10.2",
+        "h20-C10-vm1": "10.0.10.3",
+        "h40-C30-vm1": "10.0.30.1",
+    }
+
+    for ns in destinations:
+        subprocess.Popen(f"ip netns exec {ns} iperf3 -s", shell=True)
+
+    time.sleep(1)
+
+    # 2. Tráfico de fondo (Escenario 1)
+    traffic_generators = [
+        ("h1-C10-vm2", "10.0.10.1"),
+        ("h20-C20-vm2", "10.0.20.1"),
+    ]
+
+    for ns, dst in traffic_generators:
+        threading.Thread(target=iperf, args=(ns, dst, 20)).start()
+
+    # 3. Espera ligera y lanza iperf de pruebas desde h1-C10-vm1
+    time.sleep(2)  # esperar a que empiece a generarse tráfico
+    h1_client_ns = "h1-C10-vm1"
+    for name, ip in destinations.items():
+        logfile = f"/tmp/test_{name}_escenario1.log"
+        print(f"[ESC1] iperf desde {h1_client_ns} hacia {name} ({ip})")
+        threading.Thread(target=iperf, args=(h1_client_ns, ip, 10, logfile)).start()
+
+    time.sleep(25)
+
+    # 4. Tráfico de fondo (Escenario 2)
+    traffic_generators_2 = [
+        ("h1-C10-vm2", "10.0.10.1"),
+        ("h20-C20-vm2", "10.0.20.1"),
+        ("h25-C20-vm2", "10.0.20.2"),
+        ("h40-C30-vm1", "10.0.30.1"),
+        ("h20-C10-vm1", "10.0.10.3"),
+        ("h25-C10-vm1", "10.0.10.4"),
+    ]
+
+    for ns, dst in traffic_generators_2:
+        threading.Thread(target=iperf, args=(ns, dst, 20)).start()
+
+    time.sleep(2)
+    for name, ip in destinations.items():
+        logfile = f"/tmp/test_{name}_escenario2.log"
+        print(f"[ESC2] iperf desde {h1_client_ns} hacia {name} ({ip})")
+        threading.Thread(target=iperf, args=(h1_client_ns, ip, 10, logfile)).start()
+
 
 def register_host(net, host):
     ip  = host.IP()
@@ -112,9 +173,9 @@ def create_spine_leaf_topology(spine_switches, leaf_switches, hosts_per_leaf, li
     # Conectar switches leaf a los switches spine con redundancia
     for leaf in leaves:
         for spine in spines:
-            net.addLink(leaf, spine, cls=TCLink, bw=link_bandwidth, htb=True)
+            net.addLink(leaf, spine, cls=TCLink, bw=link_bandwidth, htb=True, delay='0.5ms')
             if redundancy: 
-                net.addLink(leaf, spine, cls=TCLink, bw=link_bandwidth, htb=True)
+                net.addLink(leaf, spine, cls=TCLink, bw=link_bandwidth, htb=True, delay='0.5ms')
 
     bw_leaf2host = (3 * (uplinks * link_bandwidth)) / hosts_per_leaf
     if bw_leaf2host > 1000: 
@@ -127,7 +188,7 @@ def create_spine_leaf_topology(spine_switches, leaf_switches, hosts_per_leaf, li
             host = net.addHost(f"h{host_count}")
             net.addLink(
                 host, leaf, 
-                cls=TCLink, bw=bw_leaf2host, htb=True
+                cls=TCLink, bw=bw_leaf2host, htb=True, delay='1ms'
                 )
             host_count += 1
 
